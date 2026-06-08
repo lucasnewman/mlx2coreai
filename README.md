@@ -1,6 +1,6 @@
 # mlx2coreai
 
-Experimental MLX to CoreAI conversion pipeline.
+Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) conversion pipeline.
 
 The package captures MLX execution into a small graph IR, lowers supported MLX
 ops to CoreAI MLIR with `coreai.GraphOp`, and saves `.aimodel` assets.
