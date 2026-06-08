@@ -201,6 +201,25 @@ def test_dynamic_dim_refs_lower_to_coreai_runtime_shapes(tmp_path: Path) -> None
     assert (asset_path / "main.mlirb").exists()
 
 
+def test_dynamic_broadcast_preserves_static_result_dims(tmp_path: Path) -> None:
+    seq = dynamic_dim_ref("x", 1)
+    graph = Graph(
+        inputs=[TensorSpec("x", (1, -1, 1024), "fp32")],
+        nodes=[
+            Node("broadcast_to", ("x",), "out", attrs={"shape": [1, seq, 1024]}),
+        ],
+        outputs=["out"],
+    )
+    lowered = lower_graph_to_coreai(graph, config=ConversionConfig(optimize=False))
+    text = str(lowered.program)
+    assert "coreai.broadcast_to" in text
+    assert "tensor<1x?x1024xf32>" in text
+    assert "tensor<?x?x?xf32>" not in text
+    asset_path = tmp_path / "dynamic_broadcast.aimodel"
+    lowered.program.save_asset(asset_path)
+    assert (asset_path / "main.mlirb").exists()
+
+
 def test_dynamic_causal_sdpa_skips_coreai_optimizer() -> None:
     graph = Graph(
         inputs=[

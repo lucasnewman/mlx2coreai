@@ -292,6 +292,22 @@ def _reshape_with_mixed_shape(value: Value, shape: Sequence[Any]) -> Value:
     ).result
 
 
+def _broadcast_to_with_shape(
+    value: Value,
+    shape_operand: Value | np.ndarray,
+    result_shape: Sequence[Any],
+) -> Value:
+    if isinstance(shape_operand, Value):
+        shape_operand = coreai.cast(shape_operand, IntegerType.get_unsigned(32))
+    else:
+        shape_operand = coreai.constant(np.asarray(shape_operand, dtype=np.uint32))
+    return coreai.BroadcastToOp(
+        value,
+        shape_operand,
+        results=[_ranked_tensor_type(result_shape, value.type.element_type)],
+    ).result
+
+
 def _reshape_like(value: Value, exemplar: Value) -> Value:
     shape: list[Any] = []
     for axis, dim in enumerate(exemplar.type.shape):
@@ -716,7 +732,11 @@ class CoreAILowerer:
             shape = node.attrs.get("shape")
             if shape is None:
                 shape = self.inferred.get(node.output).shape
-            return coreai.broadcast_to(self.env[node.inputs[0]], self._shape_operand(shape))
+            return _broadcast_to_with_shape(
+                self.env[node.inputs[0]],
+                self._shape_operand(shape),
+                shape,
+            )
         if op == "broadcast_arrays":
             return self._lower_broadcast_arrays(node)
 
@@ -988,8 +1008,16 @@ class CoreAILowerer:
             target_shape = shapes[0]
             for shape in shapes[1:]:
                 target_shape = coreai.broadcast_shapes(target_shape, shape)
-            return coreai.broadcast_to(self.env[node.inputs[output_index]], target_shape)
-        return coreai.broadcast_to(self.env[node.inputs[output_index]], _as_shape_value(spec.shape))
+            return _broadcast_to_with_shape(
+                self.env[node.inputs[output_index]],
+                target_shape,
+                spec.shape,
+            )
+        return _broadcast_to_with_shape(
+            self.env[node.inputs[output_index]],
+            _as_shape_value(spec.shape),
+            spec.shape,
+        )
 
     def _lower_take(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]
@@ -1081,7 +1109,7 @@ class CoreAILowerer:
             value = node.attrs.get("value", value)
         if _shape_has_runtime_dims(shape):
             scalar = coreai.constant(value, dtype=_element_type(dtype))
-            return coreai.broadcast_to(scalar, self._shape_operand(shape))
+            return _broadcast_to_with_shape(scalar, self._shape_operand(shape), shape)
         if any(int(dim) < 0 for dim in shape):
             raise ValueError(f"{op} node '{node.output}' has dynamic shape without runtime dimension refs: {shape!r}.")
         return self._constant(node.output, np.full(shape, value, dtype=_np_dtype_for_ir(dtype)), dtype=dtype, source=op)
@@ -1602,8 +1630,8 @@ def _causal_mask_like(scores: Value) -> Value:
     k = _reshape_with_mixed_shape(k, [1, k_dim])
     mask_shape = [q_dim, k_dim]
     mask_shape_operand = _mixed_shape_operand(mask_shape)
-    q = coreai.broadcast_to(q, mask_shape_operand)
-    k = coreai.broadcast_to(k, mask_shape_operand)
+    q = _broadcast_to_with_shape(q, mask_shape_operand, mask_shape)
+    k = _broadcast_to_with_shape(k, mask_shape_operand, mask_shape)
     future = coreai.greater(k, q)
     return coreai.broadcasting_mul(coreai.cast(future, scores.type.element_type), coreai.constant(-1e4, dtype=scores.type.element_type))
 
@@ -1784,8 +1812,8 @@ def _rope_body(
         for axis, dim in enumerate(shape[:-1])
     ] + [half]
     half_shape_operand = _mixed_shape_operand(half_shape)
-    cos = coreai.broadcast_to(cos, half_shape_operand)
-    sin = coreai.broadcast_to(sin, half_shape_operand)
+    cos = _broadcast_to_with_shape(cos, half_shape_operand, half_shape)
+    sin = _broadcast_to_with_shape(sin, half_shape_operand, half_shape)
     if interleaved:
         pairs_shape = [
             dim if int(dim) >= 0 else _dim_1d_from_value(x, axis)

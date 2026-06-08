@@ -120,6 +120,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional coreai.runtime.StorageKind name for input NDArrays.",
     )
     parser.add_argument(
+        "--compute-unit",
+        default="auto",
+        choices=("auto", "default", "cpu", "cpu-preferred", "gpu", "neural-engine"),
+        help=(
+            "CoreAI specialization target. 'auto' preserves asset.executable() "
+            "behavior, 'default' passes SpecializationOptions.default(), 'cpu' "
+            "uses CPU-only specialization, and CPU-preferred/GPU/Neural Engine "
+            "are preferred compute-unit hints."
+        ),
+    )
+    parser.add_argument(
+        "--debug-specialization",
+        action="store_true",
+        help="Enable CoreAI specialization debug mode when supported by the runtime.",
+    )
+    parser.add_argument(
         "--json-output",
         type=Path,
         default=None,
@@ -148,13 +164,18 @@ async def benchmark(args: argparse.Namespace) -> list[BenchmarkRow]:
 
     bindings = _load_coreai_runtime()
     storage_kind = _resolve_storage_kind(args.storage_kind, bindings.StorageKind)
+    specialization_options = resolve_specialization_options(args, bindings)
     asset = bindings.AIModelAsset.load(args.asset)
     rng = np.random.default_rng(args.seed)
     output_name = args.output_name
     rows: list[BenchmarkRow] = []
 
-    print(f"loading executable from {args.asset}", file=sys.stderr)
-    async with asset.executable() as ai_model:
+    print(
+        f"loading executable from {args.asset} "
+        f"(compute_unit={args.compute_unit})",
+        file=sys.stderr,
+    )
+    async with asset.executable(specialization_options=specialization_options) as ai_model:
         function = ai_model.load_function(args.function_name)
         print_table_header()
 
@@ -242,6 +263,38 @@ def load_tokenizer(model_id: str | None, *, revision: str | None) -> Any | None:
     )
     del model
     return tokenizer
+
+
+def resolve_specialization_options(args: argparse.Namespace, bindings: Any) -> Any | None:
+    if args.compute_unit == "auto" and not args.debug_specialization:
+        return None
+
+    SpecializationOptions = getattr(bindings, "SpecializationOptions", None)
+    ComputeUnitKind = getattr(bindings, "ComputeUnitKind", None)
+    if SpecializationOptions is None or ComputeUnitKind is None:
+        raise RuntimeError("Installed coreai.runtime does not expose specialization options.")
+
+    if args.compute_unit == "auto" or args.compute_unit == "default":
+        options = SpecializationOptions.default()
+    elif args.compute_unit == "cpu":
+        options = SpecializationOptions.cpu_only()
+    elif args.compute_unit == "cpu-preferred":
+        options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.cpu())
+    elif args.compute_unit == "gpu":
+        options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
+    elif args.compute_unit == "neural-engine":
+        options = SpecializationOptions.from_preferred_compute_unit_kind(
+            ComputeUnitKind.neural_engine()
+        )
+    else:  # pragma: no cover - argparse choices prevent this path.
+        raise ValueError(f"Unknown compute unit: {args.compute_unit!r}")
+
+    if args.debug_specialization:
+        with_debug = getattr(options, "with_debug", None)
+        if not callable(with_debug):
+            raise RuntimeError("Installed coreai.runtime does not support debug specialization.")
+        options = with_debug(enabled=True)
+    return options
 
 
 def make_initial_context(
@@ -373,6 +426,8 @@ def write_json(path: Path, rows: list[BenchmarkRow], args: argparse.Namespace) -
         "temperature": float(args.temperature),
         "top_k": int(args.top_k),
         "grow_context": bool(args.grow_context),
+        "compute_unit": str(args.compute_unit),
+        "debug_specialization": bool(args.debug_specialization),
         "results": [asdict(row) for row in rows],
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

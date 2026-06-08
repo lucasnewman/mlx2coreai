@@ -151,9 +151,10 @@ python scripts/benchmark_aimodel_sampling.py qwen3.aimodel \
 ```
 
 Pass `--model-id mlx-community/Qwen3-0.6B-bf16 --prompt "hello"` to seed the
-benchmark with real tokenized text, and `--decode` to print sampled text. The
-script keeps the CoreAI executable loaded for the whole run and reports timed
-tokens/sec after per-context warmup.
+benchmark with real tokenized text, and `--decode` to print sampled text. Pass
+`--compute-unit gpu` or `--compute-unit neural-engine` on macOS 27+ to request a
+preferred CoreAI specialization target. The script keeps the CoreAI executable
+loaded for the whole run and reports timed tokens/sec after per-context warmup.
 
 ## Caveats
 

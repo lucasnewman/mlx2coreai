@@ -52,6 +52,8 @@ class _CoreAIRuntimeBindings:
     AIModelAsset: Any
     NDArray: Any
     StorageKind: Any
+    SpecializationOptions: Any | None = None
+    ComputeUnitKind: Any | None = None
 
 
 def coreai_runtime_available() -> bool:
@@ -403,7 +405,12 @@ def validate_converted_model_sync(
 def _load_coreai_runtime() -> _CoreAIRuntimeBindings:
     try:
         from coreai.authoring import AIModelAsset  # noqa: PLC0415
-        from coreai.runtime import NDArray, StorageKind  # noqa: PLC0415
+        from coreai.runtime import (  # noqa: PLC0415
+            ComputeUnitKind,
+            NDArray,
+            SpecializationOptions,
+            StorageKind,
+        )
     except Exception as exc:  # pragma: no cover - depends on installed wheel/OS
         raise CoreAIRuntimeUnavailableError(
             "coreai.runtime is not available. Install coreai-core with runtime "
@@ -413,6 +420,8 @@ def _load_coreai_runtime() -> _CoreAIRuntimeBindings:
         AIModelAsset=AIModelAsset,
         NDArray=NDArray,
         StorageKind=StorageKind,
+        SpecializationOptions=SpecializationOptions,
+        ComputeUnitKind=ComputeUnitKind,
     )
 
 
