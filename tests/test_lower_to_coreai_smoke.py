@@ -220,7 +220,7 @@ def test_dynamic_broadcast_preserves_static_result_dims(tmp_path: Path) -> None:
     assert (asset_path / "main.mlirb").exists()
 
 
-def test_dynamic_causal_sdpa_skips_coreai_optimizer() -> None:
+def test_dynamic_causal_sdpa_runs_coreai_optimizer() -> None:
     graph = Graph(
         inputs=[
             TensorSpec("q", (1, 16, -1, 8), "fp32"),
@@ -238,8 +238,8 @@ def test_dynamic_causal_sdpa_skips_coreai_optimizer() -> None:
         outputs=["out"],
     )
     lowered = lower_graph_to_coreai(graph, config=ConversionConfig(optimize=True))
-    assert lowered.optimized is False
-    assert lowered.optimization_skip_reason == "coreai_optimize_dynamic_causal_sdpa_reshape_bug"
+    assert lowered.optimized is True
+    assert lowered.optimization_skip_reason is None
 
 
 def test_probe_dynamicizes_sequence_attrs() -> None:

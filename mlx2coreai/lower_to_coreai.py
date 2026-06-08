@@ -1923,12 +1923,6 @@ def build_coreai_program(
 
 
 def _optimization_skip_reason(graph: Graph) -> str | None:
-    has_dynamic_input = any(any(int(dim) < 0 for dim in spec.shape) for spec in graph.inputs)
-    if not has_dynamic_input:
-        return None
-    for node in graph.nodes:
-        if node.op == "scaled_dot_product_attention" and bool(node.attrs.get("do_causal", node.attrs.get("is_causal", False))):
-            return "coreai_optimize_dynamic_causal_sdpa_reshape_bug"
     return None
 
 

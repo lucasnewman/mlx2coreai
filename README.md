@@ -158,12 +158,9 @@ loaded for the whole run and reports timed tokens/sec after per-context warmup.
 
 ## Caveats
 
-Dynamic causal `scaled_dot_product_attention` graphs currently skip
-`AIProgram.optimize()` because the beta optimizer rewrites the causal mask into
-an invalid runtime reshape for dynamic sequence shapes. MLX BF16 constants are
-currently widened to FP32 during capture so executable assets can pass CoreAI
-verification; expect small full-model logit drift against the original BF16 MLX
-forward pass.
+MLX BF16 constants are currently widened to FP32 during
+capture so full-model assets can pass CoreAI optimization and verification;
+expect small full-model logit drift against the original BF16 MLX forward pass.
 
 The beta asset writer currently rejects the native `coreai.conv_transpose2d`
 op. The backend lowers the common 1x1 stride-1 case to reshape/matmul/transpose
