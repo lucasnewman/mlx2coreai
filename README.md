@@ -5,6 +5,10 @@ Experimental MLX to CoreAI conversion pipeline.
 The package captures MLX execution into a small graph IR, lowers supported MLX
 ops to CoreAI MLIR with `coreai.GraphOp`, and saves `.aimodel` assets.
 
+## Installation
+
+`pip install mlx2coreai`
+
 ## Usage
 
 ```python
