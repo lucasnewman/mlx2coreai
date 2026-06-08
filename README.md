@@ -45,7 +45,7 @@ Install `mlx-lm`, then use the helper to load a Hugging Face model with
 asset:
 
 ```bash
-mlx2coreai convert-mlx-lm mlx-community/Qwen3-0.6B-Instruct-bf16 \
+mlx2coreai convert-mlx-lm mlx-community/Qwen3-0.6B-bf16 \
   --output qwen.aimodel
 ```
 
@@ -55,7 +55,7 @@ The same path is available from Python:
 from mlx2coreai import ConversionConfig, convert_mlx_lm
 
 converted = convert_mlx_lm(
-    "mlx-community/Qwen3-0.6B-Instruct-bf16",
+    "mlx-community/Qwen3-0.6B-bf16",
     "qwen.aimodel",
     config=ConversionConfig(optimize=True),
 )
@@ -149,7 +149,7 @@ To sample a converted language model and benchmark repeated forwards at fixed
 context lengths:
 
 ```bash
-python scripts/benchmark_aimodel_sampling.py qwen3.aimodel \
+python scripts/benchmark_aimodel_sampling.py model.aimodel \
   --contexts 16,32,64,128,256 \
   --steps 8
 ```
