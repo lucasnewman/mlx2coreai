@@ -5,23 +5,28 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mlx2coreai"
 version = "0.1.0"
-description = "Experimental MLX to CoreAI conversion pipeline."
+description = "Convert MLX models to CoreAI"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+authors = [
+    { name = "Lucas Newman", email = "lucasnewman@me.com" },
+]
+keywords = [
+    "artificial intelligence",
+    "coreai",
+    "machine learning",
+    "mlx",
+]
 dependencies = [
     "coreai-core==1.0.0b1",
     "ml-dtypes",
+    "mlx",
+    "mlx-lm",
     "numpy",
 ]
 
 [project.optional-dependencies]
-mlx = [
-    "mlx",
-]
-lm = [
-    "mlx-lm",
-]
 test = [
     "pytest",
 ]
