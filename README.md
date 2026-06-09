@@ -75,6 +75,30 @@ fixed-shape asset is desired. Generic conversions can opt into the same
 mechanism with `ConversionConfig(dynamic_axes={"input": [axis]},
 dynamic_probe_inputs={...})`.
 
+For autoregressive decoding, the stateful helper writes one coreai-models-style
+`.aimodel` with a single `main` entrypoint. The function takes `input_ids`,
+`position_ids`, and two CoreAI mutable state buffers named `keyCache` and
+`valueCache`, each stacked by layer:
+
+```bash
+python -m mlx2coreai convert-mlx-lm-stateful mlx-community/Qwen3-0.6B-bf16 \
+  --output qwen \
+  --max-context-length 256 \
+  --prompt "hello"
+```
+
+By default the helper uses a dynamic token axis and dynamic state context axis.
+`--compute-precision auto` preserves the checkpoint dtype where possible; BF16
+MLX checkpoints are saved with BF16 weights and KV state, while logits are cast
+to FP16 by default to match the public Qwen3 coreai-models recipe. Pass
+`--compute-precision fp16|bf16|fp32`, `--cache-dtype`, `--no-dynamic-sequence`,
+or `--no-dynamic-state` to override those defaults.
+
+The output is a coreai-models-style bundle directory containing
+`metadata.json`, `tokenizer/`, and a nested `<name>.aimodel` asset. Passing an
+output path ending in `.aimodel` uses that filename for the nested asset and the
+bundle path without the suffix.
+
 ## Coverage
 
 The current backend covers the generic op families needed by the vendored
@@ -145,26 +169,29 @@ the MLX capture outputs. `run_aimodel_sync(...)` and
 `validate_converted_model_sync(...)` are available for scripts that are not
 already inside an event loop.
 
-To sample a converted language model and benchmark repeated forwards at fixed
-context lengths:
+To benchmark sampling from a stateful language-model bundle, run the current
+sampling benchmark against the bundle directory:
 
 ```bash
-python scripts/benchmark_aimodel_sampling.py qwen3.aimodel \
+python scripts/benchmark_aimodel_sampling.py qwen \
   --contexts 16,32,64,128,256 \
-  --steps 8
+  --steps 16 \
+  --model-id mlx-community/Qwen3-0.6B-bf16 \
+  --decode
 ```
 
-Pass `--model-id mlx-community/Qwen3-0.6B-bf16 --prompt "hello"` to seed the
-benchmark with real tokenized text, and `--decode` to print sampled text. Pass
-`--compute-unit gpu` or `--compute-unit neural-engine` on macOS 27+ to request a
-preferred CoreAI specialization target. The script keeps the CoreAI executable
-loaded for the whole run and reports timed tokens/sec after per-context warmup.
+The script accepts either the bundle directory (`qwen`) or the nested
+`.aimodel` path (`qwen/qwen.aimodel`). It loads the unified `main` entrypoint,
+runs one prefill call for each context length, then times one-token decode calls
+against CoreAI mutable KV state. Pass `--prompt "hello"` to seed the context
+with real text, `--grow-context` to advance `position_ids` after each sampled
+token, and `--json-output results.json` to save machine-readable results.
 
 ## Caveats
 
-MLX BF16 constants are currently widened to FP32 during
-capture so full-model assets can pass CoreAI optimization and verification;
-expect small full-model logit drift against the original BF16 MLX forward pass.
+BF16 MLX constants are preserved as BF16 weights when `ml_dtypes` is available.
+Some scalar literals and normalization constants may still be emitted in a
+higher precision when the CoreAI type system requires it.
 
 The beta asset writer currently rejects the native `coreai.conv_transpose2d`
 op. The backend lowers the common 1x1 stride-1 case to reshape/matmul/transpose

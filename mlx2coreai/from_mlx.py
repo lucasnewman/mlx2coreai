@@ -85,6 +85,8 @@ def _constant_to_numpy(value: Any) -> np.ndarray:
             try:
                 import mlx.core as mx  # noqa: PLC0415
 
+                if "bfloat16" in str(getattr(value, "dtype", "")).lower():
+                    return np.asarray(value.astype(mx.float32)).astype(ml_dtypes.bfloat16)
                 return np.asarray(value.astype(mx.float32))
             except Exception:
                 pass
@@ -145,6 +147,11 @@ def _primitive_attrs_from_arguments(
             stride = _int_list(arguments[2])
             if stride is not None:
                 attrs["stride"] = stride
+
+    if op in {"dynamic_slice_update", "dynamicsliceupdate"} and arguments:
+        axes = _int_list(arguments[0])
+        if axes is not None:
+            attrs["axes"] = axes
 
     if op in {"sum", "mean", "min", "max", "prod", "all", "any", "var", "std", "logsumexp"}:
         if arguments:

@@ -7,6 +7,7 @@ import numpy as np
 from mlx2coreai.conversion import ConversionConfig, lower_graph_to_coreai
 from mlx2coreai.dynamic_shapes import dynamicize_graph_from_probe
 from mlx2coreai.ir import Graph, Node, TensorSpec, dynamic_dim_ref, is_dynamic_dim_ref
+from mlx2coreai.lower_to_coreai import CoreAIGraphEntry, CoreAILoweringConfig, build_coreai_programs
 
 
 def test_smoke_asset_generation(tmp_path: Path) -> None:
@@ -26,6 +27,33 @@ def test_smoke_asset_generation(tmp_path: Path) -> None:
         "main.mlirb",
         "metadata.json",
     ]
+
+
+def test_multi_entrypoint_asset_generation(tmp_path: Path) -> None:
+    prefill = Graph(
+        inputs=[TensorSpec("x", (1, 4), "fp32")],
+        nodes=[Node("add", ("x", "x"), "out")],
+        outputs=["out"],
+    )
+    decode = Graph(
+        inputs=[TensorSpec("x", (1, 1), "fp32")],
+        nodes=[Node("tanh", ("x",), "out")],
+        outputs=["out"],
+    )
+    lowered = build_coreai_programs(
+        [
+            CoreAIGraphEntry("prefill", prefill, public_input_names={"x"}),
+            CoreAIGraphEntry("decode", decode, public_input_names={"x"}),
+        ],
+        config=CoreAILoweringConfig(optimize=False),
+    )
+    text = str(lowered.program)
+    assert lowered.entrypoint_names == ["prefill", "decode"]
+    assert "@prefill" in text
+    assert "@decode" in text
+    asset_path = tmp_path / "multi.aimodel"
+    lowered.program.save_asset(asset_path)
+    assert (asset_path / "main.mlirb").exists()
 
 
 def test_externalized_weight_is_not_public_input(tmp_path: Path) -> None:
@@ -130,6 +158,29 @@ def test_sdpa_and_rope_composites_save(tmp_path: Path) -> None:
         asset_path = tmp_path / f"{name}.aimodel"
         lowered.program.save_asset(asset_path)
         assert (asset_path / "main.mlirb").exists()
+
+
+def test_dynamic_slice_update_saves(tmp_path: Path) -> None:
+    graph = Graph(
+        inputs=[
+            TensorSpec("cache", (1, 2, 4, 3), "fp32"),
+            TensorSpec("value", (1, 2, 1, 3), "fp32"),
+            TensorSpec("start", (4,), "int32"),
+        ],
+        nodes=[
+            Node(
+                "dynamic_slice_update",
+                ("cache", "value", "start"),
+                "updated",
+                attrs={"axes": [0, 1, 2, 3]},
+            )
+        ],
+        outputs=["updated"],
+    )
+    lowered = lower_graph_to_coreai(graph, config=ConversionConfig(optimize=False))
+    asset_path = tmp_path / "dynamic_slice_update.aimodel"
+    lowered.program.save_asset(asset_path)
+    assert (asset_path / "main.mlirb").exists()
 
 
 def test_sdpa_composite_supports_grouped_query_attention(tmp_path: Path) -> None:

@@ -1,24 +1,32 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from mlx2coreai import ConversionConfig, build_mlx_lm_inputs, convert_mlx_lm
+from mlx2coreai import ConversionConfig, build_mlx_lm_inputs, convert_mlx_lm, convert_mlx_lm_stateful
 from mlx2coreai import convert_mlx_lm as exported_convert_mlx_lm
+from mlx2coreai import convert_mlx_lm_stateful as exported_convert_mlx_lm_stateful
 from mlx2coreai import convert_mlx_to_coreai as exported_convert_mlx_to_coreai
 from mlx2coreai._convert_mlx_lm import load_mlx_lm_model, parse_args
 
 
 class FakeTokenizer:
     eos_token_id = 9
+    vocab_size = 10
 
     def encode(self, prompt: str) -> list[int]:
         assert prompt == "hello"
         return [1, 2, 3]
+
+    def save_pretrained(self, path: str) -> None:
+        dest = Path(path)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "tokenizer.json").write_text("{}", encoding="utf-8")
 
 
 def test_build_mlx_lm_inputs_tokenizes_pads_and_batches() -> None:
@@ -185,6 +193,70 @@ def test_convert_mlx_lm_live_mlx_smoke_saves_asset(tmp_path: Path) -> None:
     assert converted.metadata["mlx_lm"]["token_count"] == 4
 
 
+def test_convert_mlx_lm_stateful_live_mlx_smoke_saves_unified_asset(tmp_path: Path) -> None:
+    mx = pytest.importorskip("mlx.core")
+
+    class TinyModel:
+        eval_called = False
+        args = SimpleNamespace(num_key_value_heads=1, head_dim=1)
+        layers = [SimpleNamespace(self_attn=SimpleNamespace(n_kv_heads=1))]
+
+        def eval(self) -> None:
+            self.eval_called = True
+
+        def __call__(self, input_ids, *, cache):
+            values = mx.reshape(input_ids.astype(mx.float32), (1, 1, input_ids.shape[1], 1))
+            cache[0].update_and_fetch(values, values)
+            return input_ids.astype(mx.float32)
+
+    model = TinyModel()
+
+    def fake_load(model_id: str, **kwargs: object):
+        assert model_id == "tiny-stateful"
+        assert kwargs == {"lazy": False}
+        return model, FakeTokenizer()
+
+    converted = convert_mlx_lm_stateful(
+        "tiny-stateful",
+        tmp_path / "tiny-stateful",
+        input_name="input_ids",
+        max_context_length=8,
+        dynamic_sequence=False,
+        dynamic_state=False,
+        config=ConversionConfig(optimize=False),
+        load_fn=fake_load,
+    )
+
+    assert model.eval_called
+    bundle_path = tmp_path / "tiny-stateful"
+    asset_path = bundle_path / "tiny-stateful.aimodel"
+    assert (asset_path / "main.mlirb").exists()
+    assert (bundle_path / "tokenizer" / "tokenizer.json").exists()
+    bundle_metadata = json.loads((bundle_path / "metadata.json").read_text(encoding="utf-8"))
+    assert bundle_metadata["metadata_version"] == "0.2"
+    assert bundle_metadata["kind"] == "llm"
+    assert bundle_metadata["assets"] == {"main": "tiny-stateful.aimodel"}
+    assert bundle_metadata["language"]["tokenizer"] == "tiny-stateful"
+    assert bundle_metadata["language"]["vocab_size"] == 10
+    assert bundle_metadata["language"]["max_context_length"] == 8
+    assert bundle_metadata["language"]["embedded_tokenizer"] is True
+    assert bundle_metadata["language"]["function_map"] == {"main": ["main"]}
+    assert bundle_metadata["source"] == {
+        "model_definition": "mlx",
+        "hf_model_id": "tiny-stateful",
+    }
+    assert bundle_metadata["compression"] is None
+    assert bundle_metadata["compilation"]["targets"] == []
+    assert converted.bundle_path == bundle_path
+    assert converted.asset_path == asset_path
+    assert converted.bundle_metadata == bundle_metadata
+    assert converted.lowered.entrypoint_names == ["main"]
+    assert converted.metadata["mlx_lm_stateful"]["state_count"] == 2
+    assert converted.metadata["mlx_lm_stateful"]["key_cache_name"] == "keyCache"
+    assert converted.metadata["mlx_lm_stateful"]["value_cache_name"] == "valueCache"
+    assert "MutableBuffers.buffer_mutation" in str(converted.program)
+
+
 def test_parse_args_accepts_model_and_output() -> None:
     args = parse_args(
         [
@@ -214,4 +286,5 @@ def test_parse_args_sequence_length_is_optional() -> None:
 
 def test_public_exports_are_available() -> None:
     assert exported_convert_mlx_lm is convert_mlx_lm
+    assert exported_convert_mlx_lm_stateful is convert_mlx_lm_stateful
     assert callable(exported_convert_mlx_to_coreai)

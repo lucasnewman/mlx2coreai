@@ -35,8 +35,10 @@ from .runtime import (
 
 _LAZY_EXPORTS = {
     "MLXLMConversionInputs": "MLXLMConversionInputs",
+    "MLXLMStatefulConversion": ("._convert_mlx_lm_stateful", "MLXLMStatefulConversion"),
     "build_mlx_lm_inputs": "build_mlx_lm_inputs",
     "convert_mlx_lm": "convert_mlx_lm",
+    "convert_mlx_lm_stateful": ("._convert_mlx_lm_stateful", "convert_mlx_lm_stateful"),
 }
 
 __all__ = [
@@ -49,6 +51,7 @@ __all__ = [
     "CoreAIValidationResult",
     "Graph",
     "MLXLMConversionInputs",
+    "MLXLMStatefulConversion",
     "Node",
     "PreparedMLXGraph",
     "StateSpec",
@@ -57,6 +60,7 @@ __all__ = [
     "capture_mlx_graph",
     "compare_coreai_outputs",
     "convert_mlx_lm",
+    "convert_mlx_lm_stateful",
     "convert_mlx_to_coreai",
     "coreai_runtime_available",
     "lower_graph_to_coreai",
@@ -75,10 +79,14 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    export_name = _LAZY_EXPORTS.get(name)
-    if export_name is None:
+    export = _LAZY_EXPORTS.get(name)
+    if export is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module = import_module("._convert_mlx_lm", __name__)
+    if isinstance(export, tuple):
+        module_name, export_name = export
+    else:
+        module_name, export_name = "._convert_mlx_lm", export
+    module = import_module(module_name, __name__)
     value = getattr(module, export_name)
     globals()[name] = value
     return value

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from ._convert_mlx_lm import convert_mlx_lm
+from ._convert_mlx_lm_stateful import convert_mlx_lm_stateful
 from .conversion import ConversionConfig
 from .op_coverage import write_coverage_report
 
@@ -58,6 +59,59 @@ def main(argv: list[str] | None = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    stateful_parser = subparsers.add_parser(
+        "convert-mlx-lm-stateful",
+        help="Load an mlx-lm model and save one coreai-models-style stateful bundle.",
+    )
+    stateful_parser.add_argument("model_id")
+    stateful_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output bundle directory. A .aimodel suffix is treated as the nested asset name.",
+    )
+    stateful_parser.add_argument("--prompt", default=None)
+    stateful_parser.add_argument("--max-context-length", type=int, default=256)
+    stateful_parser.add_argument("--revision", default=None)
+    stateful_parser.add_argument("--input-name", default="input_ids")
+    stateful_parser.add_argument("--position-ids-name", default="position_ids")
+    stateful_parser.add_argument("--key-cache-name", default="keyCache")
+    stateful_parser.add_argument("--value-cache-name", default="valueCache")
+    stateful_parser.add_argument("--compute-precision", default="auto", choices=["auto", "fp32", "fp16", "bf16"])
+    stateful_parser.add_argument("--cache-dtype", default=None, choices=["fp32", "fp16", "bf16"])
+    stateful_parser.add_argument("--entrypoint", default="main")
+    stateful_parser.add_argument(
+        "--dynamic-sequence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    stateful_parser.add_argument(
+        "--dynamic-state",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    stateful_parser.add_argument(
+        "--cast-bf16-logits-to-fp16",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    stateful_parser.add_argument(
+        "--externalize-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    stateful_parser.add_argument("--external-weight-threshold", type=int, default=10)
+    stateful_parser.add_argument(
+        "--capture-is-training",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    stateful_parser.add_argument(
+        "--allow-unknown-sources",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    stateful_parser.add_argument("--no-optimize", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -112,6 +166,40 @@ def main(argv: list[str] | None = None) -> int:
             f"Weights: {len(converted.weight_manifest)} constants "
             f"({resource_count} resource, {inline_count} inline)"
         )
+        return 0
+
+    if args.command == "convert-mlx-lm-stateful":
+        converted = convert_mlx_lm_stateful(
+            args.model_id,
+            args.output,
+            prompt=args.prompt,
+            max_context_length=args.max_context_length,
+            revision=args.revision,
+            input_name=args.input_name,
+            position_ids_name=args.position_ids_name,
+            key_cache_name=args.key_cache_name,
+            value_cache_name=args.value_cache_name,
+            compute_precision=args.compute_precision,
+            cache_dtype=args.cache_dtype,
+            entrypoint_name=args.entrypoint,
+            dynamic_sequence=bool(args.dynamic_sequence),
+            dynamic_state=bool(args.dynamic_state),
+            cast_bf16_logits_to_fp16=bool(args.cast_bf16_logits_to_fp16),
+            config=ConversionConfig(
+                allow_unknown_sources=bool(args.allow_unknown_sources),
+                capture_is_training=bool(args.capture_is_training),
+                optimize=not bool(args.no_optimize),
+                externalize_weights=bool(args.externalize_weights),
+                external_weight_threshold=int(args.external_weight_threshold),
+            ),
+        )
+        print(f"Wrote bundle {converted.bundle_path}")
+        print(f"Asset: {converted.asset_path}")
+        print(f"Entrypoints: {', '.join(converted.lowered.entrypoint_names)}")
+        print(f"States: {len(converted.state_specs)}")
+        print(f"Compute precision: {converted.metadata['mlx_lm_stateful']['compute_precision']}")
+        print(f"Cache dtype: {converted.metadata['mlx_lm_stateful']['cache_dtype']}")
+        print(f"Max context: {converted.max_context_length}")
         return 0
 
     parser.print_help()

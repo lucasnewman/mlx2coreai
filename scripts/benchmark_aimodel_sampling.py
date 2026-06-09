@@ -11,150 +11,66 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import ml_dtypes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mlx2coreai._convert_mlx_lm import build_mlx_lm_inputs, load_mlx_lm_model
-from mlx2coreai.runtime import (
-    _load_coreai_runtime,
-    _output_to_numpy,
-    _resolve_storage_kind,
-    _to_ndarray,
-)
 
 
 @dataclass(slots=True)
-class BenchmarkRow:
+class StatefulBenchmarkRow:
     context_length: int
     steps: int
     elapsed_sec: float
     tokens_per_sec: float
     output_name: str
-    final_context_length: int
+    position_start: int
+    position_end: int
     sampled_tokens: list[int]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Sample a converted CoreAI language-model .aimodel and report "
-            "tokens/sec at fixed context intervals."
-        )
-    )
-    parser.add_argument("asset", type=Path, help="Path to the .aimodel directory.")
-    parser.add_argument(
-        "--contexts",
-        default="16,32,64,128,256",
-        help="Comma-separated context lengths to benchmark.",
+        description="Benchmark one-token decode throughput for a coreai-models-style stateful .aimodel asset."
     )
     parser.add_argument(
-        "--steps",
-        type=int,
-        default=8,
-        help="Number of generated tokens to time for each context length.",
+        "asset",
+        type=Path,
+        help="Unified stateful .aimodel asset or coreai-models-style bundle directory.",
     )
-    parser.add_argument(
-        "--warmup",
-        type=int,
-        default=1,
-        help="Untimed forwards to run before each context length.",
-    )
+    parser.add_argument("--contexts", default="16,32,64,128,256")
+    parser.add_argument("--steps", type=int, default=16)
+    parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--function-name", default="main")
     parser.add_argument("--input-name", default="input_ids")
-    parser.add_argument(
-        "--output-name",
-        default=None,
-        help="Logits output name. Defaults to the first output returned by the runtime.",
-    )
-    parser.add_argument(
-        "--model-id",
-        default=None,
-        help=(
-            "Optional mlx-lm model id used only to load a tokenizer for the "
-            "prompt and --decode output. If omitted, synthetic token ids are used."
-        ),
-    )
-    parser.add_argument("--revision", default=None, help="Optional mlx-lm revision.")
-    parser.add_argument(
-        "--prompt",
-        default=None,
-        help="Optional prompt to tokenize when --model-id is provided.",
-    )
-    parser.add_argument(
-        "--fill-token-id",
-        type=int,
-        default=0,
-        help="Synthetic token id used when no tokenizer is loaded.",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.0,
-        help="Sampling temperature. Use 0 for deterministic greedy decoding.",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=50,
-        help="Top-k candidate count for non-greedy sampling. Use 0 to sample all logits.",
-    )
+    parser.add_argument("--position-ids-name", default="position_ids")
+    parser.add_argument("--output-name", default=None)
+    parser.add_argument("--model-id", default=None)
+    parser.add_argument("--revision", default=None)
+    parser.add_argument("--prompt", default=None)
+    parser.add_argument("--fill-token-id", type=int, default=0)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--grow-context",
         action="store_true",
-        help=(
-            "Append generated tokens without trimming. By default the script "
-            "keeps a fixed sliding window for each context interval."
-        ),
+        help="Increment position_ids after each sampled token. Default keeps each interval fixed.",
     )
-    parser.add_argument(
-        "--decode",
-        action="store_true",
-        help="Decode sampled token ids when --model-id provides a tokenizer.",
-    )
-    parser.add_argument(
-        "--storage-kind",
-        default=None,
-        help="Optional coreai.runtime.StorageKind name for input NDArrays.",
-    )
-    parser.add_argument(
-        "--compute-unit",
-        default="auto",
-        choices=("auto", "default", "cpu", "cpu-preferred", "gpu", "neural-engine"),
-        help=(
-            "CoreAI specialization target. 'auto' preserves asset.executable() "
-            "behavior, 'default' passes SpecializationOptions.default(), 'cpu' "
-            "uses CPU-only specialization, and CPU-preferred/GPU/Neural Engine "
-            "are preferred compute-unit hints."
-        ),
-    )
-    parser.add_argument(
-        "--debug-specialization",
-        action="store_true",
-        help="Enable CoreAI specialization debug mode when supported by the runtime.",
-    )
-    parser.add_argument(
-        "--json-output",
-        type=Path,
-        default=None,
-        help="Optional path to write benchmark results as JSON.",
-    )
+    parser.add_argument("--decode", action="store_true")
+    parser.add_argument("--json-output", type=Path, default=None)
     return parser.parse_args(argv)
 
 
-async def benchmark(args: argparse.Namespace) -> list[BenchmarkRow]:
-    contexts = parse_contexts(args.contexts)
+async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
     if args.steps <= 0:
         raise ValueError(f"--steps must be positive, got {args.steps}.")
     if args.warmup < 0:
         raise ValueError(f"--warmup must be non-negative, got {args.warmup}.")
-    if args.temperature < 0:
-        raise ValueError(f"--temperature must be non-negative, got {args.temperature}.")
-    if args.top_k < 0:
-        raise ValueError(f"--top-k must be non-negative, got {args.top_k}.")
-
+    contexts = parse_contexts(args.contexts)
     tokenizer = load_tokenizer(args.model_id, revision=args.revision)
     if args.prompt is not None and tokenizer is None:
         print(
@@ -162,71 +78,87 @@ async def benchmark(args: argparse.Namespace) -> list[BenchmarkRow]:
             file=sys.stderr,
         )
 
-    bindings = _load_coreai_runtime()
-    storage_kind = _resolve_storage_kind(args.storage_kind, bindings.StorageKind)
-    specialization_options = resolve_specialization_options(args, bindings)
-    asset = bindings.AIModelAsset.load(args.asset)
+    from coreai.authoring import AIModelAsset  # noqa: PLC0415
+    from coreai.runtime import NDArray  # noqa: PLC0415
+
+    asset_path = resolve_asset_path(args.asset)
+    asset = AIModelAsset.load(asset_path)
     rng = np.random.default_rng(args.seed)
-    output_name = args.output_name
-    rows: list[BenchmarkRow] = []
+    rows: list[StatefulBenchmarkRow] = []
 
-    print(
-        f"loading executable from {args.asset} "
-        f"(compute_unit={args.compute_unit})",
-        file=sys.stderr,
-    )
-    async with asset.executable(specialization_options=specialization_options) as ai_model:
-        function = ai_model.load_function(args.function_name)
+    print(f"loading executable from {asset_path}", file=sys.stderr)
+    async with asset.executable() as model:
+        function = model.load_function(args.function_name)
+        output_name = args.output_name or first_output_name(function)
         print_table_header()
-
         for context_length in contexts:
-            context = make_initial_context(
+            state_capacity = context_length + (args.steps if args.grow_context else 1)
+            state = allocate_state(function, NDArray, state_capacity=state_capacity)
+            token_ids = context_token_ids(
                 context_length,
                 tokenizer=tokenizer,
                 prompt=args.prompt,
                 fill_token_id=args.fill_token_id,
             )
+            outputs = await run_main(
+                function,
+                NDArray,
+                token_ids,
+                np.arange(context_length, dtype=np.int32),
+                state,
+                input_name=args.input_name,
+                position_ids_name=args.position_ids_name,
+            )
+            token = sample_next_token(
+                last_token_logits(outputs[output_name].numpy()),
+                rng=rng,
+                temperature=args.temperature,
+                top_k=args.top_k,
+            )
+            position = context_length
             for _ in range(args.warmup):
-                _, output_name = await run_logits(
+                outputs = await run_main(
                     function,
-                    context,
+                    NDArray,
+                    np.asarray([token], dtype=np.int32),
+                    np.asarray([position], dtype=np.int32),
+                    state,
                     input_name=args.input_name,
-                    output_name=output_name,
-                    bindings=bindings,
-                    storage_kind=storage_kind,
+                    position_ids_name=args.position_ids_name,
                 )
+                token = greedy_token(outputs[output_name].numpy())
 
             sampled_tokens: list[int] = []
+            start_position = position
             start = time.perf_counter()
             for _ in range(args.steps):
-                logits, output_name = await run_logits(
+                outputs = await run_main(
                     function,
-                    context,
+                    NDArray,
+                    np.asarray([token], dtype=np.int32),
+                    np.asarray([position], dtype=np.int32),
+                    state,
                     input_name=args.input_name,
-                    output_name=output_name,
-                    bindings=bindings,
-                    storage_kind=storage_kind,
+                    position_ids_name=args.position_ids_name,
                 )
-                token_id = sample_next_token(
-                    last_token_logits(logits),
+                token = sample_next_token(
+                    last_token_logits(outputs[output_name].numpy()),
                     rng=rng,
                     temperature=args.temperature,
                     top_k=args.top_k,
                 )
-                sampled_tokens.append(token_id)
-                context = append_token(
-                    context,
-                    token_id,
-                    max_length=None if args.grow_context else context_length,
-                )
-            elapsed_sec = time.perf_counter() - start
-            row = BenchmarkRow(
+                sampled_tokens.append(token)
+                if args.grow_context:
+                    position += 1
+            elapsed = time.perf_counter() - start
+            row = StatefulBenchmarkRow(
                 context_length=context_length,
                 steps=args.steps,
-                elapsed_sec=elapsed_sec,
-                tokens_per_sec=args.steps / elapsed_sec if elapsed_sec > 0 else float("inf"),
-                output_name=str(output_name),
-                final_context_length=int(context.shape[1]),
+                elapsed_sec=elapsed,
+                tokens_per_sec=args.steps / elapsed if elapsed > 0 else float("inf"),
+                output_name=output_name,
+                position_start=start_position,
+                position_end=position,
                 sampled_tokens=sampled_tokens,
             )
             rows.append(row)
@@ -237,67 +169,71 @@ async def benchmark(args: argparse.Namespace) -> list[BenchmarkRow]:
     return rows
 
 
-def parse_contexts(value: str) -> list[int]:
-    contexts: list[int] = []
-    for chunk in value.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        context = int(chunk)
-        if context <= 0:
-            raise ValueError(f"context lengths must be positive, got {context}.")
-        contexts.append(context)
-    if not contexts:
-        raise ValueError("--contexts must contain at least one positive integer.")
-    return contexts
+def resolve_asset_path(path: Path) -> Path:
+    if path.suffix == ".aimodel":
+        return path
+    metadata_path = path / "metadata.json"
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        asset_name = metadata.get("assets", {}).get("main")
+        if not isinstance(asset_name, str):
+            raise ValueError(f"{metadata_path} does not contain assets.main.")
+        return path / asset_name
+    candidates = sorted(path.glob("*.aimodel")) if path.is_dir() else []
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ValueError(f"Could not resolve .aimodel asset from {path}.")
 
 
-def load_tokenizer(model_id: str | None, *, revision: str | None) -> Any | None:
-    if model_id is None:
-        return None
-    print(f"loading tokenizer from {model_id}", file=sys.stderr)
-    model, tokenizer = load_mlx_lm_model(
-        model_id,
-        lazy_load=True,
-        revision=revision,
+async def run_main(
+    function: Any,
+    NDArray: Any,
+    token_ids: np.ndarray,
+    position_ids: np.ndarray,
+    state: dict[str, Any],
+    *,
+    input_name: str,
+    position_ids_name: str,
+) -> dict[str, Any]:
+    return await function(
+        inputs={
+            input_name: NDArray(np.asarray(token_ids, dtype=np.int32)[None, :]),
+            position_ids_name: NDArray(np.asarray(position_ids, dtype=np.int32)[None, :]),
+        },
+        state=state,
     )
-    del model
-    return tokenizer
 
 
-def resolve_specialization_options(args: argparse.Namespace, bindings: Any) -> Any | None:
-    if args.compute_unit == "auto" and not args.debug_specialization:
-        return None
-
-    SpecializationOptions = getattr(bindings, "SpecializationOptions", None)
-    ComputeUnitKind = getattr(bindings, "ComputeUnitKind", None)
-    if SpecializationOptions is None or ComputeUnitKind is None:
-        raise RuntimeError("Installed coreai.runtime does not expose specialization options.")
-
-    if args.compute_unit == "auto" or args.compute_unit == "default":
-        options = SpecializationOptions.default()
-    elif args.compute_unit == "cpu":
-        options = SpecializationOptions.cpu_only()
-    elif args.compute_unit == "cpu-preferred":
-        options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.cpu())
-    elif args.compute_unit == "gpu":
-        options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-    elif args.compute_unit == "neural-engine":
-        options = SpecializationOptions.from_preferred_compute_unit_kind(
-            ComputeUnitKind.neural_engine()
-        )
-    else:  # pragma: no cover - argparse choices prevent this path.
-        raise ValueError(f"Unknown compute unit: {args.compute_unit!r}")
-
-    if args.debug_specialization:
-        with_debug = getattr(options, "with_debug", None)
-        if not callable(with_debug):
-            raise RuntimeError("Installed coreai.runtime does not support debug specialization.")
-        options = with_debug(enabled=True)
-    return options
+def allocate_state(function: Any, NDArray: Any, *, state_capacity: int) -> dict[str, Any]:
+    state: dict[str, Any] = {}
+    for name in function.desc.state_names:
+        descriptor = function.desc.state_descriptor(name=name)
+        shape = tuple(int(state_capacity) if int(dim) < 0 else int(dim) for dim in descriptor.shape)
+        state[name] = NDArray(np.zeros(shape, dtype=_runtime_dtype_to_numpy(descriptor.dtype)))
+    return state
 
 
-def make_initial_context(
+def _runtime_dtype_to_numpy(dtype: Any) -> Any:
+    text = str(dtype).strip().lower()
+    if "bfloat16" in text or "bf16" in text:
+        return ml_dtypes.bfloat16
+    if "float16" in text or "fp16" in text:
+        return np.float16
+    if "float32" in text or "fp32" in text:
+        return np.float32
+    if "int32" in text:
+        return np.int32
+    raise ValueError(f"Unsupported runtime state dtype: {dtype!r}.")
+
+
+def first_output_name(function: Any) -> str:
+    output_names = list(function.desc.output_names)
+    if not output_names:
+        raise ValueError("decode function has no runtime outputs.")
+    return str(output_names[0])
+
+
+def context_token_ids(
     context_length: int,
     *,
     tokenizer: Any | None,
@@ -305,40 +241,30 @@ def make_initial_context(
     fill_token_id: int,
 ) -> np.ndarray:
     if tokenizer is None and prompt is None:
-        return np.full((1, context_length), int(fill_token_id), dtype=np.int32)
+        return np.full((context_length,), int(fill_token_id), dtype=np.int32)
     inputs = build_mlx_lm_inputs(
         tokenizer=tokenizer,
         prompt=prompt,
-        sequence_length=context_length,
+        sequence_length=max(1, context_length),
         batch_size=1,
     )
-    return np.asarray(inputs.input_ids, dtype=np.int32)
+    return np.asarray(inputs.input_ids[0], dtype=np.int32)
 
 
-async def run_logits(
-    function: Any,
-    input_ids: np.ndarray,
-    *,
-    input_name: str,
-    output_name: str | None,
-    bindings: Any,
-    storage_kind: Any | None,
-) -> tuple[np.ndarray, str]:
-    outputs = await function(
-        inputs={
-            input_name: _to_ndarray(input_ids, bindings.NDArray, storage_kind),
-        }
-    )
-    resolved_name = output_name
-    if resolved_name is None:
-        try:
-            resolved_name = next(iter(outputs))
-        except StopIteration as exc:
-            raise ValueError("CoreAI runtime returned no outputs.") from exc
-    if resolved_name not in outputs:
-        available = ", ".join(str(name) for name in outputs)
-        raise KeyError(f"Output {resolved_name!r} not found. Available outputs: {available}")
-    return _output_to_numpy(outputs[resolved_name]), str(resolved_name)
+def parse_contexts(value: str) -> list[int]:
+    contexts = [int(chunk.strip()) for chunk in value.split(",") if chunk.strip()]
+    if not contexts or any(context <= 0 for context in contexts):
+        raise ValueError("--contexts must contain positive integers.")
+    return contexts
+
+
+def load_tokenizer(model_id: str | None, *, revision: str | None) -> Any | None:
+    if model_id is None:
+        return None
+    print(f"loading tokenizer from {model_id}", file=sys.stderr)
+    model, tokenizer = load_mlx_lm_model(model_id, lazy_load=True, revision=revision)
+    del model
+    return tokenizer
 
 
 def last_token_logits(logits: np.ndarray) -> np.ndarray:
@@ -352,6 +278,10 @@ def last_token_logits(logits: np.ndarray) -> np.ndarray:
     raise ValueError(f"Expected logits with rank 1, 2, or 3, got shape {array.shape}.")
 
 
+def greedy_token(logits: np.ndarray) -> int:
+    return int(np.nanargmax(last_token_logits(logits)))
+
+
 def sample_next_token(
     logits: np.ndarray,
     *,
@@ -362,7 +292,6 @@ def sample_next_token(
     scores = np.asarray(logits, dtype=np.float64)
     if temperature == 0:
         return int(np.nanargmax(scores))
-
     scores = np.nan_to_num(scores / float(temperature), nan=-np.inf)
     if 0 < top_k < scores.shape[-1]:
         candidate_indices = np.argpartition(scores, -top_k)[-top_k:]
@@ -370,7 +299,6 @@ def sample_next_token(
     else:
         candidate_indices = np.arange(scores.shape[-1])
         candidate_scores = scores
-
     shifted = candidate_scores - np.max(candidate_scores)
     probabilities = np.exp(shifted)
     total = float(np.sum(probabilities))
@@ -378,19 +306,6 @@ def sample_next_token(
         return int(candidate_indices[np.nanargmax(candidate_scores)])
     probabilities = probabilities / total
     return int(rng.choice(candidate_indices, p=probabilities))
-
-
-def append_token(
-    input_ids: np.ndarray,
-    token_id: int,
-    *,
-    max_length: int | None,
-) -> np.ndarray:
-    token = np.asarray([[int(token_id)]], dtype=np.int32)
-    appended = np.concatenate([input_ids, token], axis=1)
-    if max_length is None:
-        return appended
-    return appended[:, -int(max_length) :]
 
 
 def decode_tokens(tokenizer: Any, token_ids: list[int]) -> str:
@@ -401,33 +316,33 @@ def decode_tokens(tokenizer: Any, token_ids: list[int]) -> str:
 
 
 def print_table_header() -> None:
-    print(f"{'context':>8} {'steps':>6} {'elapsed_s':>10} {'tok/s':>10} {'output':>10} {'final_seq':>10}")
-    print(f"{'-' * 8} {'-' * 6} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 10}", flush=True)
+    print(f"{'context':>8} {'steps':>6} {'elapsed_s':>10} {'tok/s':>10} {'output':>10} {'pos0':>8} {'pos1':>8}")
+    print(f"{'-' * 8} {'-' * 6} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 8} {'-' * 8}", flush=True)
 
 
-def print_table_row(row: BenchmarkRow) -> None:
+def print_table_row(row: StatefulBenchmarkRow) -> None:
     print(
         f"{row.context_length:8d} "
         f"{row.steps:6d} "
         f"{row.elapsed_sec:10.3f} "
         f"{row.tokens_per_sec:10.2f} "
         f"{row.output_name:>10} "
-        f"{row.final_context_length:10d}",
+        f"{row.position_start:8d} "
+        f"{row.position_end:8d}",
         flush=True,
     )
 
 
-def write_json(path: Path, rows: list[BenchmarkRow], args: argparse.Namespace) -> None:
+def write_json(path: Path, rows: list[StatefulBenchmarkRow], args: argparse.Namespace) -> None:
     payload = {
         "asset": str(args.asset),
+        "function_name": str(args.function_name),
         "contexts": parse_contexts(args.contexts),
         "steps": int(args.steps),
         "warmup": int(args.warmup),
         "temperature": float(args.temperature),
         "top_k": int(args.top_k),
         "grow_context": bool(args.grow_context),
-        "compute_unit": str(args.compute_unit),
-        "debug_specialization": bool(args.debug_specialization),
         "results": [asdict(row) for row in rows],
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -435,41 +350,11 @@ def write_json(path: Path, rows: list[BenchmarkRow], args: argparse.Namespace) -
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    try:
-        rows = asyncio.run(benchmark(args))
-    except RuntimeError as exc:
-        hint = runtime_error_hint(exc, args)
-        if hint is not None:
-            print(hint, file=sys.stderr)
-            return 1
-        raise
+    rows = asyncio.run(benchmark(args))
     if args.json_output is not None:
         write_json(args.json_output, rows, args)
         print(f"wrote {args.json_output}", file=sys.stderr)
     return 0
-
-
-def runtime_error_hint(exc: RuntimeError, args: argparse.Namespace) -> str | None:
-    message = str(exc)
-    if "coreai.reshape" not in message or "The output shape must have the same number of elements" not in message:
-        return None
-    command = (
-        "python -m mlx2coreai convert-mlx-lm mlx-community/Qwen3-0.6B-bf16 "
-        "--output qwen3-fixed.aimodel"
-    )
-    if args.model_id is not None:
-        command = f"python -m mlx2coreai convert-mlx-lm {args.model_id} --output qwen3-fixed.aimodel"
-    return (
-        "\nCoreAI runtime rejected a reshape while executing the asset. This "
-        "matches the stale optimized dynamic causal-attention asset failure "
-        "seen with earlier qwen3.aimodel builds.\n\n"
-        "Regenerate the .aimodel with the current converter defaults, which "
-        "skip the beta CoreAI optimizer for dynamic causal SDPA graphs, or "
-        "pass --no-optimize explicitly. Example:\n\n"
-        f"  {command}\n\n"
-        "Then benchmark the regenerated asset. Original runtime error:\n"
-        f"  {message}"
-    )
 
 
 if __name__ == "__main__":

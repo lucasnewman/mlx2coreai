@@ -34,6 +34,7 @@ test = [
 [project.scripts]
 mlx2coreai = "mlx2coreai.cli:main"
 mlx2coreai-convert-mlx-lm = "mlx2coreai._convert_mlx_lm:main"
+mlx2coreai-convert-mlx-lm-stateful = "mlx2coreai._convert_mlx_lm_stateful:main"
 
 [tool.setuptools]
 include-package-data = false
