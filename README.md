@@ -1,6 +1,6 @@
 # mlx2coreai
 
-Experimental MLX to CoreAI conversion pipeline.
+Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) conversion pipeline.
 
 The package captures MLX execution into a small graph IR, lowers supported MLX
 ops to CoreAI MLIR with `coreai.GraphOp`, and saves `.aimodel` assets.
@@ -45,7 +45,7 @@ Install `mlx-lm`, then use the helper to load a Hugging Face model with
 asset:
 
 ```bash
-mlx2coreai convert-mlx-lm mlx-community/Qwen3-0.6B-Instruct-bf16 \
+mlx2coreai convert-mlx-lm mlx-community/Qwen3-0.6B-bf16 \
   --output qwen.aimodel
 ```
 
@@ -55,7 +55,7 @@ The same path is available from Python:
 from mlx2coreai import ConversionConfig, convert_mlx_lm
 
 converted = convert_mlx_lm(
-    "mlx-community/Qwen3-0.6B-Instruct-bf16",
+    "mlx-community/Qwen3-0.6B-bf16",
     "qwen.aimodel",
     config=ConversionConfig(optimize=True),
 )
@@ -173,19 +173,21 @@ To benchmark sampling from a stateful language-model bundle, run the current
 sampling benchmark against the bundle directory:
 
 ```bash
-python scripts/benchmark_aimodel_sampling.py qwen \
+python scripts/benchmark_aimodel_sampling.py <model_dir> \
   --contexts 16,32,64,128,256 \
   --steps 16 \
-  --model-id mlx-community/Qwen3-0.6B-bf16 \
   --decode
 ```
 
 The script accepts either the bundle directory (`qwen`) or the nested
 `.aimodel` path (`qwen/qwen.aimodel`). It loads the unified `main` entrypoint,
 runs one prefill call for each context length, then times one-token decode calls
-against CoreAI mutable KV state. Pass `--prompt "hello"` to seed the context
-with real text, `--grow-context` to advance `position_ids` after each sampled
-token, and `--json-output results.json` to save machine-readable results.
+against CoreAI mutable KV state. It uses the embedded bundle tokenizer when
+available; pass `--model-id ...` only to override or benchmark a direct
+`.aimodel` without a sibling `tokenizer/`. Pass `--prompt "hello"` to seed the
+context with real text, `--grow-context` to advance `position_ids` after each
+sampled token, and `--json-output results.json` to save machine-readable
+results.
 
 ## Caveats
 
