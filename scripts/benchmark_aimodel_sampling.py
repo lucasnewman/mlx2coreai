@@ -4,6 +4,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import platform
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -66,6 +70,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--decode", action="store_true")
     parser.add_argument("--json-output", type=Path, default=None)
+    parser.add_argument(
+        "--runtime-backend",
+        choices=("auto", "python", "swift"),
+        default="auto",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args(argv)
 
 
@@ -381,8 +391,135 @@ def write_json(path: Path, rows: list[StatefulBenchmarkRow], args: argparse.Name
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def should_use_swift_backend(args: argparse.Namespace) -> bool:
+    if args.runtime_backend == "python":
+        return False
+    if args.runtime_backend == "swift":
+        return True
+    return (
+        platform.system() == "Darwin"
+        and swift_backend_sdk_path() is not None
+        and not unsupported_swift_backend_options(args)
+    )
+
+
+def unsupported_swift_backend_options(args: argparse.Namespace) -> list[str]:
+    unsupported: list[str] = []
+    if args.prompt is not None:
+        unsupported.append("--prompt")
+    if args.model_id is not None:
+        unsupported.append("--model-id")
+    if args.revision is not None:
+        unsupported.append("--revision")
+    if args.decode:
+        unsupported.append("--decode")
+    if args.json_output is not None:
+        unsupported.append("--json-output")
+    if float(args.temperature) != 0.0:
+        unsupported.append("--temperature != 0")
+    return unsupported
+
+
+def run_swift_backend(args: argparse.Namespace) -> int:
+    unsupported = unsupported_swift_backend_options(args)
+    if unsupported:
+        raise ValueError(
+            "Swift CoreAI backend currently supports synthetic greedy benchmarking only; "
+            f"unsupported options: {', '.join(unsupported)}."
+        )
+
+    asset_path = resolve_asset_path(args.asset)
+    binary, env = ensure_swift_backend()
+    command = [
+        str(binary),
+        str(asset_path),
+        "--contexts",
+        str(args.contexts),
+        "--steps",
+        str(args.steps),
+        "--warmup",
+        str(args.warmup),
+        "--function-name",
+        str(args.function_name),
+        "--input-name",
+        str(args.input_name),
+        "--position-ids-name",
+        str(args.position_ids_name),
+        "--fill-token-id",
+        str(args.fill_token_id),
+    ]
+    if args.output_name is not None:
+        command.extend(["--output-name", str(args.output_name)])
+    if args.grow_context:
+        command.append("--grow-context")
+
+    print(f"loading executable from {asset_path}", file=sys.stderr)
+    completed = subprocess.run(command, env=env, check=False)
+    return int(completed.returncode)
+
+
+def ensure_swift_backend() -> tuple[Path, dict[str, str]]:
+    sdk_path = swift_backend_sdk_path()
+    if sdk_path is None:
+        raise RuntimeError(
+            "Could not find a macOS 27 SDK with CoreAI.framework. "
+            "Set SDKROOT or install Xcode beta at /Applications/Xcode-beta.app."
+        )
+    swiftc = shutil.which("xcrun")
+    if swiftc is None:
+        raise RuntimeError("Could not find xcrun for compiling the Swift CoreAI backend.")
+
+    source = REPO_ROOT / "scripts" / "benchmark_aimodel_sampling_coreai.swift"
+    binary = REPO_ROOT / ".build" / "coreai_stateful_benchmark"
+    env = os.environ.copy()
+    for parent in sdk_path.parents:
+        if (parent / "Toolchains").exists() and (parent / "Platforms").exists():
+            env["DEVELOPER_DIR"] = str(parent)
+            break
+    env["SDKROOT"] = str(sdk_path)
+
+    needs_compile = not binary.exists() or binary.stat().st_mtime < source.stat().st_mtime
+    if needs_compile:
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        target_arch = "arm64" if platform.machine() == "arm64" else "x86_64"
+        command = [
+            "xcrun",
+            "swiftc",
+            "-parse-as-library",
+            "-sdk",
+            str(sdk_path),
+            "-target",
+            f"{target_arch}-apple-macos27.0",
+            "-framework",
+            "CoreAI",
+            str(source),
+            "-o",
+            str(binary),
+        ]
+        subprocess.run(command, env=env, check=True)
+    return binary, env
+
+
+def swift_backend_sdk_path() -> Path | None:
+    candidates: list[Path] = []
+    if os.environ.get("SDKROOT"):
+        candidates.append(Path(os.environ["SDKROOT"]))
+    candidates.append(
+        Path("/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
+    )
+    for candidate in candidates:
+        if (
+            candidate.exists()
+            and (candidate / "System/Library/Frameworks/CoreAI.framework").exists()
+        ):
+            return candidate
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if should_use_swift_backend(args):
+        return run_swift_backend(args)
     rows = asyncio.run(benchmark(args))
     if args.json_output is not None:
         write_json(args.json_output, rows, args)
