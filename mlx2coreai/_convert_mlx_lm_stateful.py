@@ -132,7 +132,6 @@ def convert_mlx_lm_stateful(
     model_id: str,
     output_path: str | Path,
     *,
-    prompt: str | None = None,
     max_context_length: int = 256,
     batch_size: int = 1,
     revision: str | None = None,
@@ -193,7 +192,6 @@ def convert_mlx_lm_stateful(
 
     lm_inputs = build_mlx_lm_inputs(
         tokenizer=tokenizer,
-        prompt=prompt,
         sequence_length=trace_sequence_length,
         batch_size=batch_size,
     )
@@ -824,7 +822,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Output coreai-models-style bundle directory. A .aimodel suffix is treated as the nested asset name.",
     )
-    parser.add_argument("--prompt", default=None)
     parser.add_argument("--max-context-length", type=int, default=256)
     parser.add_argument("--revision", default=None)
     parser.add_argument("--input-name", default="input_ids")
@@ -850,7 +847,6 @@ def main(argv: list[str] | None = None) -> int:
     converted = convert_mlx_lm_stateful(
         args.model_id,
         args.output,
-        prompt=args.prompt,
         max_context_length=args.max_context_length,
         revision=args.revision,
         input_name=args.input_name,

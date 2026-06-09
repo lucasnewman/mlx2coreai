@@ -48,8 +48,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--input-name", default="input_ids")
     parser.add_argument("--position-ids-name", default="position_ids")
     parser.add_argument("--output-name", default=None)
-    parser.add_argument("--model-id", default=None)
-    parser.add_argument("--revision", default=None)
+    parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Optional tokenizer override. Defaults to the bundle tokenizer when available.",
+    )
+    parser.add_argument("--revision", default=None, help="Revision for --model-id tokenizer override.")
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--fill-token-id", type=int, default=0)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -71,17 +75,21 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
     if args.warmup < 0:
         raise ValueError(f"--warmup must be non-negative, got {args.warmup}.")
     contexts = parse_contexts(args.contexts)
-    tokenizer = load_tokenizer(args.model_id, revision=args.revision)
+    asset_path = resolve_asset_path(args.asset)
+    tokenizer = load_tokenizer(
+        args.model_id,
+        revision=args.revision,
+        bundle_path=resolve_bundle_path(args.asset, asset_path=asset_path),
+    )
     if args.prompt is not None and tokenizer is None:
         print(
-            "warning: --prompt was provided without --model-id; using synthetic token ids",
+            "warning: --prompt was provided but no tokenizer was available; using synthetic token ids",
             file=sys.stderr,
         )
 
     from coreai.authoring import AIModelAsset  # noqa: PLC0415
     from coreai.runtime import NDArray  # noqa: PLC0415
 
-    asset_path = resolve_asset_path(args.asset)
     asset = AIModelAsset.load(asset_path)
     rng = np.random.default_rng(args.seed)
     rows: list[StatefulBenchmarkRow] = []
@@ -185,6 +193,14 @@ def resolve_asset_path(path: Path) -> Path:
     raise ValueError(f"Could not resolve .aimodel asset from {path}.")
 
 
+def resolve_bundle_path(path: Path, *, asset_path: Path) -> Path | None:
+    if path.is_dir() and (path / "tokenizer").is_dir():
+        return path
+    if asset_path.parent.is_dir() and (asset_path.parent / "tokenizer").is_dir():
+        return asset_path.parent
+    return None
+
+
 async def run_main(
     function: Any,
     NDArray: Any,
@@ -258,9 +274,26 @@ def parse_contexts(value: str) -> list[int]:
     return contexts
 
 
-def load_tokenizer(model_id: str | None, *, revision: str | None) -> Any | None:
+def load_tokenizer(
+    model_id: str | None,
+    *,
+    revision: str | None,
+    bundle_path: Path | None,
+) -> Any | None:
     if model_id is None:
-        return None
+        tokenizer_dir = bundle_path / "tokenizer" if bundle_path is not None else None
+        if tokenizer_dir is None or not tokenizer_dir.is_dir():
+            return None
+        print(f"loading tokenizer from {tokenizer_dir}", file=sys.stderr)
+        try:
+            from transformers import AutoTokenizer  # noqa: PLC0415
+        except Exception as exc:
+            print(
+                f"warning: could not import transformers to load embedded tokenizer: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        return AutoTokenizer.from_pretrained(str(tokenizer_dir))
     print(f"loading tokenizer from {model_id}", file=sys.stderr)
     model, tokenizer = load_mlx_lm_model(model_id, lazy_load=True, revision=revision)
     del model

@@ -70,7 +70,6 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Output bundle directory. A .aimodel suffix is treated as the nested asset name.",
     )
-    stateful_parser.add_argument("--prompt", default=None)
     stateful_parser.add_argument("--max-context-length", type=int, default=256)
     stateful_parser.add_argument("--revision", default=None)
     stateful_parser.add_argument("--input-name", default="input_ids")
@@ -172,7 +171,6 @@ def main(argv: list[str] | None = None) -> int:
         converted = convert_mlx_lm_stateful(
             args.model_id,
             args.output,
-            prompt=args.prompt,
             max_context_length=args.max_context_length,
             revision=args.revision,
             input_name=args.input_name,
