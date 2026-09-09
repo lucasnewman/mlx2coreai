@@ -51,6 +51,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--function-name", default="main")
     parser.add_argument("--input-name", default="input_ids")
     parser.add_argument("--position-ids-name", default="position_ids")
+    parser.add_argument(
+        "--position-ids-layout", choices=("query", "context"), default="query",
+        help="One position per input token (default), or the full cached position range.",
+    )
     parser.add_argument("--output-name", default=None)
     parser.add_argument(
         "--model-id",
@@ -71,10 +75,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--decode", action="store_true")
     parser.add_argument("--json-output", type=Path, default=None)
     parser.add_argument(
+        "--logits-dir", type=Path, default=None,
+        help="Save final-step last-token logits per context as little-endian float32 files (outside timing).",
+    )
+    parser.add_argument(
         "--runtime-backend",
         choices=("auto", "python", "swift"),
         default="auto",
-        help=argparse.SUPPRESS,
+        help="Runner to use. Auto prefers Swift for supported options on macOS with a CoreAI SDK.",
     )
     return parser.parse_args(argv)
 
@@ -98,19 +106,28 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
         )
 
     from coreai.authoring import AIModelAsset  # noqa: PLC0415
-    from coreai.runtime import NDArray  # noqa: PLC0415
+    from coreai.runtime import NDArray, SpecializationOptions  # noqa: PLC0415
 
     asset = AIModelAsset.load(asset_path)
     rng = np.random.default_rng(args.seed)
     rows: list[StatefulBenchmarkRow] = []
 
+    options = None
+    if SpecializationOptions.is_supported():
+        from coreai.runtime import ComputeUnitKind  # noqa: PLC0415
+
+        options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
+        print("Python CoreAI OS runtime (GPU preferred)", file=sys.stderr)
+    else:
+        print("Python CoreAI local runtime (no delegate specialization)", file=sys.stderr)
+
     print(f"loading executable from {asset_path}", file=sys.stderr)
-    async with asset.executable() as model:
+    async with asset.executable(specialization_options=options) as model:
         function = model.load_function(args.function_name)
         output_name = args.output_name or first_output_name(function)
         print_table_header()
         for context_length in contexts:
-            state_capacity = context_length + (args.steps if args.grow_context else 1)
+            state_capacity = context_length + (args.steps + 1 if args.grow_context else 1)
             state = allocate_state(function, NDArray, state_capacity=state_capacity)
             token_ids = context_token_ids(
                 context_length,
@@ -139,7 +156,7 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
                     function,
                     NDArray,
                     np.asarray([token], dtype=np.int32),
-                    np.asarray([position], dtype=np.int32),
+                    decode_position_ids(position, layout=args.position_ids_layout),
                     state,
                     input_name=args.input_name,
                     position_ids_name=args.position_ids_name,
@@ -154,7 +171,7 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
                     function,
                     NDArray,
                     np.asarray([token], dtype=np.int32),
-                    np.asarray([position], dtype=np.int32),
+                    decode_position_ids(position, layout=args.position_ids_layout),
                     state,
                     input_name=args.input_name,
                     position_ids_name=args.position_ids_name,
@@ -181,6 +198,11 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
             )
             rows.append(row)
             print_table_row(row)
+            if args.logits_dir is not None:
+                args.logits_dir.mkdir(parents=True, exist_ok=True)
+                np.asarray(last_token_logits(outputs[output_name].numpy()), dtype="<f4").tofile(
+                    args.logits_dir / f"context_{context_length}.f32"
+                )
             if args.decode and tokenizer is not None:
                 print(f"decoded[{context_length}]: {decode_tokens(tokenizer, sampled_tokens)}")
 
@@ -230,11 +252,21 @@ async def run_main(
     )
 
 
+def decode_position_ids(position: int, *, layout: str) -> np.ndarray:
+    # The stateful exporter reads max(position_ids), not the vector length.
+    # Keep one position per query token to avoid preparing a new input shape at every step.
+    start = position if layout == "query" else 0
+    return np.arange(start, position + 1, dtype=np.int32)
+
+
 def allocate_state(function: Any, NDArray: Any, *, state_capacity: int) -> dict[str, Any]:
     state: dict[str, Any] = {}
     for name in function.desc.state_names:
         descriptor = function.desc.state_descriptor(name=name)
-        shape = tuple(int(state_capacity) if int(dim) < 0 else int(dim) for dim in descriptor.shape)
+        shape = tuple(
+            int(state_capacity) if dim is None or int(dim) < 0 else int(dim)
+            for dim in descriptor.shape
+        )
         state[name] = NDArray(np.zeros(shape, dtype=_runtime_dtype_to_numpy(descriptor.dtype)))
     return state
 
@@ -266,7 +298,7 @@ def context_token_ids(
     prompt: str | None,
     fill_token_id: int,
 ) -> np.ndarray:
-    if tokenizer is None and prompt is None:
+    if tokenizer is None or prompt is None:
         return np.full((context_length,), int(fill_token_id), dtype=np.int32)
     inputs = build_mlx_lm_inputs(
         tokenizer=tokenizer,
@@ -379,6 +411,7 @@ def print_table_row(row: StatefulBenchmarkRow) -> None:
 def write_json(path: Path, rows: list[StatefulBenchmarkRow], args: argparse.Namespace) -> None:
     payload = {
         "asset": str(args.asset),
+        "runtime_backend": "python",
         "function_name": str(args.function_name),
         "contexts": parse_contexts(args.contexts),
         "steps": int(args.steps),
@@ -386,6 +419,8 @@ def write_json(path: Path, rows: list[StatefulBenchmarkRow], args: argparse.Name
         "temperature": float(args.temperature),
         "top_k": int(args.top_k),
         "grow_context": bool(args.grow_context),
+        "fill_token_id": int(args.fill_token_id),
+        "position_ids_layout": str(args.position_ids_layout),
         "results": [asdict(row) for row in rows],
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -413,8 +448,6 @@ def unsupported_swift_backend_options(args: argparse.Namespace) -> list[str]:
         unsupported.append("--revision")
     if args.decode:
         unsupported.append("--decode")
-    if args.json_output is not None:
-        unsupported.append("--json-output")
     if float(args.temperature) != 0.0:
         unsupported.append("--temperature != 0")
     return unsupported
@@ -445,6 +478,8 @@ def run_swift_backend(args: argparse.Namespace) -> int:
         str(args.input_name),
         "--position-ids-name",
         str(args.position_ids_name),
+        "--position-ids-layout",
+        str(args.position_ids_layout),
         "--fill-token-id",
         str(args.fill_token_id),
     ]
@@ -452,6 +487,10 @@ def run_swift_backend(args: argparse.Namespace) -> int:
         command.extend(["--output-name", str(args.output_name)])
     if args.grow_context:
         command.append("--grow-context")
+    if args.json_output is not None:
+        command.extend(["--json-output", str(args.json_output)])
+    if args.logits_dir is not None:
+        command.extend(["--logits-dir", str(args.logits_dir)])
 
     print(f"loading executable from {asset_path}", file=sys.stderr)
     completed = subprocess.run(command, env=env, check=False)
@@ -463,7 +502,7 @@ def ensure_swift_backend() -> tuple[Path, dict[str, str]]:
     if sdk_path is None:
         raise RuntimeError(
             "Could not find a macOS 27 SDK with CoreAI.framework. "
-            "Set SDKROOT or install Xcode beta at /Applications/Xcode-beta.app."
+            "Set SDKROOT or select an Xcode installation with xcode-select."
         )
     swiftc = shutil.which("xcrun")
     if swiftc is None:
@@ -478,7 +517,20 @@ def ensure_swift_backend() -> tuple[Path, dict[str, str]]:
             break
     env["SDKROOT"] = str(sdk_path)
 
-    needs_compile = not binary.exists() or binary.stat().st_mtime < source.stat().st_mtime
+    compiler = Path(subprocess.check_output([swiftc, "--find", "swiftc"], env=env, text=True).strip())
+    build_stamp = binary.with_suffix(".build-info.json")
+    build_info = json.dumps({
+        "sdk": str(sdk_path.resolve()),
+        "sdk_mtime_ns": (sdk_path / "SDKSettings.json").stat().st_mtime_ns,
+        "compiler": str(compiler.resolve()),
+        "compiler_mtime_ns": compiler.stat().st_mtime_ns,
+    }, sort_keys=True)
+    needs_compile = (
+        not binary.exists()
+        or binary.stat().st_mtime < max(source.stat().st_mtime, Path(__file__).stat().st_mtime)
+        or not build_stamp.exists()
+        or build_stamp.read_text(encoding="utf-8") != build_info
+    )
     if needs_compile:
         binary.parent.mkdir(parents=True, exist_ok=True)
         target_arch = "arm64" if platform.machine() == "arm64" else "x86_64"
@@ -497,6 +549,7 @@ def ensure_swift_backend() -> tuple[Path, dict[str, str]]:
             str(binary),
         ]
         subprocess.run(command, env=env, check=True)
+        build_stamp.write_text(build_info, encoding="utf-8")
     return binary, env
 
 
@@ -504,9 +557,19 @@ def swift_backend_sdk_path() -> Path | None:
     candidates: list[Path] = []
     if os.environ.get("SDKROOT"):
         candidates.append(Path(os.environ["SDKROOT"]))
-    candidates.append(
-        Path("/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
-    )
+    xcrun = shutil.which("xcrun")
+    if xcrun is not None:
+        selected_sdk = subprocess.run(
+            [xcrun, "--sdk", "macosx", "--show-sdk-path"],
+            capture_output=True, text=True, check=False,
+        )
+        if selected_sdk.returncode == 0 and selected_sdk.stdout.strip():
+            candidates.append(Path(selected_sdk.stdout.strip()))
+    for app_name in ("Xcode.app", "Xcode-beta.app"):
+        candidates.append(
+            Path("/Applications") / app_name
+            / "Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+        )
     for candidate in candidates:
         if (
             candidate.exists()

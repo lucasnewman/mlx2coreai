@@ -10,9 +10,12 @@ struct BenchmarkOptions {
     var functionName = "main"
     var inputName = "input_ids"
     var positionIdsName = "position_ids"
+    var positionIdsLayout = "query"
     var outputName: String?
     var fillTokenId: Int32 = 0
     var growContext = false
+    var jsonOutput: String?
+    var logitsDir: String?
 
     static func parse(_ arguments: ArraySlice<String>) throws -> BenchmarkOptions {
         guard let assetPath = arguments.first else {
@@ -36,6 +39,12 @@ struct BenchmarkOptions {
                 options.inputName = requireValue(arguments, after: &index, flag: flag)
             case "--position-ids-name":
                 options.positionIdsName = requireValue(arguments, after: &index, flag: flag)
+            case "--position-ids-layout":
+                let value = requireValue(arguments, after: &index, flag: flag)
+                guard value == "query" || value == "context" else {
+                    throw BackendError.invalidArgument("--position-ids-layout must be query or context")
+                }
+                options.positionIdsLayout = value
             case "--output-name":
                 options.outputName = requireValue(arguments, after: &index, flag: flag)
             case "--fill-token-id":
@@ -43,6 +52,10 @@ struct BenchmarkOptions {
                 options.fillTokenId = Int32(value)
             case "--grow-context":
                 options.growContext = true
+            case "--json-output":
+                options.jsonOutput = requireValue(arguments, after: &index, flag: flag)
+            case "--logits-dir":
+                options.logitsDir = requireValue(arguments, after: &index, flag: flag)
             default:
                 throw BackendError.invalidArgument("unknown Swift backend argument: \(flag)")
             }
@@ -112,8 +125,12 @@ struct CoreAIBenchmarkBackend {
         let modelURL = URL(fileURLWithPath: runOptions.assetPath)
 
         var options = SpecializationOptions(preferredComputeUnitKind: .gpu)
+        // The frequent-reshape path fails MPSMemrefAllocFusion on macOS 27 build 26A428.
         options.expectFrequentReshapes = false
+        let modelLoadStart = Date()
         let model = try await AIModel(contentsOf: modelURL, options: options)
+        fputs(String(format: "model loaded in %.3f s (shape preparation may occur on first use)\n",
+                     Date().timeIntervalSince(modelLoadStart)), stderr)
         guard let descriptor = model.functionDescriptor(for: runOptions.functionName) else {
             throw BackendError.missingFunction(runOptions.functionName)
         }
@@ -143,6 +160,7 @@ struct CoreAIBenchmarkBackend {
         let vocabSize = logitsDesc.shape.last ?? 0
 
         printTableHeader()
+        var rows: [[String: Any]] = []
 
         for contextLength in runOptions.contexts {
             let stateCapacity = contextLength + (runOptions.growContext ? runOptions.steps + 1 : 1)
@@ -153,7 +171,7 @@ struct CoreAIBenchmarkBackend {
             var token = runOptions.fillTokenId
             var position = contextLength
 
-            token = try await runBatch(
+            var batch = try await runBatch(
                 function: function,
                 inputName: inputName,
                 positionName: positionName,
@@ -167,11 +185,13 @@ struct CoreAIBenchmarkBackend {
                 valueCache: &valueCache,
                 tokens: Array(repeating: token, count: contextLength),
                 totalPositions: contextLength,
+                positionIdsLayout: runOptions.positionIdsLayout,
                 vocabSize: vocabSize
             )
+            token = batch.token
 
             for _ in 0..<runOptions.warmup {
-                token = try await runBatch(
+                batch = try await runBatch(
                     function: function,
                     inputName: inputName,
                     positionName: positionName,
@@ -185,14 +205,17 @@ struct CoreAIBenchmarkBackend {
                     valueCache: &valueCache,
                     tokens: [token],
                     totalPositions: position + 1,
+                    positionIdsLayout: runOptions.positionIdsLayout,
                     vocabSize: vocabSize
                 )
+                token = batch.token
             }
 
             let startPosition = position
+            var sampledTokens: [Int32] = []
             let start = Date()
             for _ in 0..<runOptions.steps {
-                token = try await runBatch(
+                batch = try await runBatch(
                     function: function,
                     inputName: inputName,
                     positionName: positionName,
@@ -206,8 +229,11 @@ struct CoreAIBenchmarkBackend {
                     valueCache: &valueCache,
                     tokens: [token],
                     totalPositions: position + 1,
+                    positionIdsLayout: runOptions.positionIdsLayout,
                     vocabSize: vocabSize
                 )
+                token = batch.token
+                sampledTokens.append(token)
                 if runOptions.growContext {
                     position += 1
                 }
@@ -221,6 +247,37 @@ struct CoreAIBenchmarkBackend {
                 startPosition: startPosition,
                 endPosition: position
             )
+            rows.append([
+                "context_length": contextLength, "steps": runOptions.steps,
+                "elapsed_sec": elapsed, "tokens_per_sec": Double(runOptions.steps) / elapsed,
+                "output_name": outputName, "position_start": startPosition,
+                "position_end": position, "sampled_tokens": sampledTokens,
+            ])
+            if let directory = runOptions.logitsDir {
+                let url = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                let finalLogits = batch.logits
+                let view = finalLogits.view(as: Float16.self)
+                let values = view.withUnsafePointer { pointer, _, _ in
+                    (0..<vocabSize).map { Float(pointer[$0]) }
+                }
+                try values.withUnsafeBytes { bytes in
+                    try Data(bytes).write(to: url.appendingPathComponent("context_\(contextLength).f32"))
+                }
+            }
+        }
+        if let path = runOptions.jsonOutput {
+            let payload: [String: Any] = [
+                "asset": runOptions.assetPath, "runtime_backend": "swift",
+                "function_name": runOptions.functionName, "contexts": runOptions.contexts,
+                "steps": runOptions.steps, "warmup": runOptions.warmup, "temperature": 0.0,
+                "grow_context": runOptions.growContext, "fill_token_id": runOptions.fillTokenId,
+                "position_ids_layout": runOptions.positionIdsLayout,
+                "results": rows,
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: path))
+            fputs("wrote \(path)\n", stderr)
         }
     }
 
@@ -238,13 +295,18 @@ struct CoreAIBenchmarkBackend {
         valueCache: inout NDArray,
         tokens: [Int32],
         totalPositions: Int,
+        positionIdsLayout: String,
         vocabSize: Int
-    ) async throws -> Int32 {
+    ) async throws -> (token: Int32, logits: NDArray) {
         var inputIds = NDArray(descriptor: inputDesc.resolvingDynamicDimensions([1, tokens.count]))
         fillInt32(&inputIds, values: tokens)
 
-        var positionIds = NDArray(descriptor: positionDesc.resolvingDynamicDimensions([1, totalPositions]))
-        fillInt32(&positionIds, values: (0..<totalPositions).map { Int32($0) })
+        // Only max(position_ids) determines the exporter's cache offset. Avoid changing
+        // the decode input shape on every token unless the model needs the full range.
+        let positionStart = positionIdsLayout == "query" ? totalPositions - tokens.count : 0
+        var positionIds = NDArray(descriptor: positionDesc.resolvingDynamicDimensions(
+            [1, totalPositions - positionStart]))
+        fillInt32(&positionIds, values: (positionStart..<totalPositions).map { Int32($0) })
 
         var logits = NDArray(descriptor: logitsDesc.resolvingDynamicDimensions([1, tokens.count, vocabSize]))
 
@@ -260,7 +322,7 @@ struct CoreAIBenchmarkBackend {
             states: consume states,
             outputViews: consume outputs
         )
-        return greedyToken(logits: logits, tokenCount: tokens.count, vocabSize: vocabSize)
+        return (greedyToken(logits: logits, tokenCount: tokens.count, vocabSize: vocabSize), logits)
     }
 }
 
@@ -288,7 +350,7 @@ func ndArrayDescriptor(_ descriptor: InferenceValue.Descriptor?, name: String) t
 }
 
 func fillInt32(_ array: inout NDArray, values: [Int32]) {
-    var view = array.mutableView(as: Int32.self)
+    let view = array.mutableView(as: Int32.self)
     view.withUnsafeMutablePointer { pointer, _, _ in
         for i in values.indices {
             pointer[i] = values[i]
@@ -320,6 +382,7 @@ func printTableHeader() {
             + "\(leftPad("pos1", width: 8))"
     )
     print("-------- ------ ---------- ---------- ---------- -------- --------")
+    fflush(stdout)
 }
 
 func printTableRow(
@@ -341,6 +404,7 @@ func printTableRow(
                startPosition,
                endPosition)
     )
+    fflush(stdout)
 }
 
 func leftPad(_ value: String, width: Int) -> String {

@@ -4,13 +4,13 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 
 ## Summary
 
-- Supported source op names in registry: 156
-- Distinct lowering keys in registry: 121
+- Supported source op names in registry: 157
+- Distinct lowering keys in registry: 122
 - Coverage modules: `tests.model_zoo, tests.coverage_zoo`
 - Coverage graphs: 26
-- Coverage graph nodes: 252
-- Unique source ops exercised: 156
-- Unique lowering keys exercised: 121
+- Coverage graph nodes: 253
+- Unique source ops exercised: 157
+- Unique lowering keys exercised: 122
 - Asset validation: passed
 
 ## Exercised Ops
@@ -38,6 +38,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `bitwisebinary` | `bitwisebinary` | 1 | `supplemental_aliases_and_bitwise` |
 | `broadcast` | `broadcast_to` | 1 | `supplemental_constants_identity` |
 | `broadcast_arrays` | `broadcast_arrays` | 2 | `broadcast_tensordot` |
+| `broadcast_axes` | `broadcast_axes` | 1 | `supplemental_shape_index` |
 | `broadcast_to` | `broadcast_to` | 1 | `supplemental_shape_index` |
 | `cast` | `cast` | 13 | `logical_checks`, `numeric_sanity`, `p0_math_pack`, `stats_divmod` |
 | `concatenate` | `concat` | 1 | `p0_math_pack` |
@@ -201,7 +202,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `tests.coverage_zoo` | `supplemental_linear_misc` | 3 | 3 | passed |
 | `tests.coverage_zoo` | `supplemental_nn_composites` | 5 | 5 | passed |
 | `tests.coverage_zoo` | `supplemental_reductions_canonical` | 8 | 8 | passed |
-| `tests.coverage_zoo` | `supplemental_shape_index` | 11 | 11 | passed |
+| `tests.coverage_zoo` | `supplemental_shape_index` | 12 | 12 | passed |
 | `tests.coverage_zoo` | `supplemental_state_ops` | 3 | 3 | passed |
 | `tests.coverage_zoo` | `supplemental_unary_canonical` | 12 | 12 | passed |
 

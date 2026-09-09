@@ -19,7 +19,7 @@ keywords = [
     "mlx",
 ]
 dependencies = [
-    "coreai-core==1.0.0b1",
+    "coreai-core==1.0.0b2",
     "ml-dtypes",
     "mlx",
     "mlx-lm",

@@ -33,7 +33,7 @@ from coreai._compiler.types import TensorSpec as CoreAITensorSpec
 from ._composite_declaration import generate_composite_decl
 from .ir import Graph, Node, StateSpec, TensorSpec, is_dynamic_dim_ref
 from .op_registry import coreai_op_for_mlx, ensure_supported
-from .passes import infer_graph_specs, normalize_graph
+from .passes import infer_broadcast_axes_shape, infer_graph_specs, normalize_graph
 
 
 _DTYPE_ALIASES = {
@@ -847,6 +847,8 @@ class CoreAILowerer:
             )
         if op == "broadcast_arrays":
             return self._lower_broadcast_arrays(node)
+        if op == "broadcast_axes":
+            return self._lower_broadcast_axes(node)
 
         if op == "gather":
             return self._lower_gather(node)
@@ -1147,6 +1149,42 @@ class CoreAILowerer:
             _as_shape_value(spec.shape),
             spec.shape,
         )
+
+    def _lower_broadcast_axes(self, node: Node) -> Value:
+        # Lowered types retain rank even when upstream graph inference is incomplete.
+        result_shape = infer_broadcast_axes_shape(
+            [tuple(_static_or_dynamic_shape(self.env[name])) for name in node.inputs],
+            node.attrs.get("ignore_axes", []),
+        )
+        assert result_shape is not None
+        x = self.env[node.inputs[0]]
+        if all(dim >= 0 for dim in result_shape):
+            return _broadcast_to_with_shape(x, _as_shape_value(result_shape), result_shape)
+
+        ignored = set(node.attrs.get("ignore_axes", []))
+        target_shape = None
+        for name in node.inputs:
+            value = self.env[name]
+            rank = _rank(value)
+            parts = [
+                _dim_1d_from_value(value, axis, dtype=np.uint32)
+                for axis in range(rank) if axis - rank not in ignored
+            ]
+            shape = _mixed_shape_operand(parts, dtype=np.uint32)
+            if not isinstance(shape, Value):
+                shape = coreai.constant(shape)
+            target_shape = shape if target_shape is None else coreai.broadcast_shapes(target_shape, shape)
+
+        parts = []
+        reduced_axis = 0
+        for axis in range(len(result_shape)):
+            relative_axis = axis - len(result_shape)
+            if relative_axis in ignored:
+                parts.append(_dim_1d_from_value(x, relative_axis))
+            else:
+                parts.append(coreai.slice_(target_shape, [reduced_axis], [reduced_axis + 1], [1]))
+                reduced_axis += 1
+        return _broadcast_to_with_shape(x, _mixed_shape_operand(parts), result_shape)
 
     def _lower_take(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]

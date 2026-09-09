@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import math
 import re
@@ -339,6 +340,38 @@ def _infer_broadcast_shape(
         else:
             return None
     return tuple(out)
+
+
+def infer_broadcast_axes_shape(
+    shapes: Sequence[tuple[int, ...] | None],
+    ignore_axes: Sequence[int],
+) -> tuple[int, ...] | None:
+    if not shapes:
+        raise ValueError("broadcast_axes requires at least one input.")
+    axes = [int(axis) for axis in ignore_axes]
+    if axes != sorted(set(axes)) or any(axis >= 0 for axis in axes):
+        raise ValueError("broadcast_axes ignore_axes must be sorted, unique negative axes.")
+    if any(shape is None for shape in shapes):
+        return None
+
+    shape: tuple[int, ...] = ()
+    for input_shape in shapes:
+        assert input_shape is not None
+        rank = len(input_shape)
+        if any(axis < -rank for axis in axes):
+            raise ValueError(f"broadcast_axes ignore_axes {axes} are out of range for rank {rank}.")
+        reduced = tuple(dim for axis, dim in enumerate(input_shape) if axis - rank not in axes)
+        broadcast = _infer_broadcast_shape(shape, reduced)
+        if broadcast is None:
+            raise ValueError(f"broadcast_axes inputs have incompatible non-ignored dimensions: {shapes}.")
+        shape = broadcast
+
+    # Ignored dimensions are removed before broadcasting, then restored from input 0.
+    result = list(shape)
+    output_rank = len(result) + len(axes)
+    for axis in axes:
+        result.insert(output_rank + axis, shapes[0][axis])
+    return tuple(result)
 
 
 def _shape_from_attr(value: Any) -> tuple[int, ...] | None:
@@ -897,6 +930,12 @@ def _infer_node_spec(node: Node, input_specs: list[InferredTensorSpec]) -> Infer
         for shape in shapes:
             out_shape = _infer_broadcast_shape(out_shape, shape) if out_shape is not None else shape
         return InferredTensorSpec(shape=out_shape, dtype=input_specs[0].dtype)
+
+    if mil_op == "broadcast_axes":
+        shape = infer_broadcast_axes_shape(
+            [spec.shape for spec in input_specs], node.attrs.get("ignore_axes", [])
+        )
+        return InferredTensorSpec(shape=shape, dtype=input_specs[0].dtype)
 
     if mil_op == "meshgrid" and input_specs:
         if not input_specs:

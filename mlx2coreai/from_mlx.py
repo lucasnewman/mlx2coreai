@@ -11,6 +11,7 @@ import ml_dtypes
 
 from .ir import Graph, Node, TensorSpec
 from .op_registry import normalize_mlx_op_name
+from .passes import infer_broadcast_axes_shape
 
 _SOURCE_RE = re.compile(r'rank=source;\s*"([^"]+)"')
 _SINK_RE = re.compile(r'rank=sink;\s*"([^"]+)"')
@@ -120,6 +121,9 @@ def _primitive_attrs_from_arguments(
 
     if op in {"reshape", "flatten", "unflatten", "broadcast", "broadcast_to"} and output_shape is not None:
         attrs["shape"] = list(output_shape)
+
+    if op == "broadcast_axes":
+        attrs["ignore_axes"] = _int_list(arguments[0]) if arguments else []
 
     if op == "transpose" and arguments:
         perm = _int_list(arguments[0])
@@ -1082,6 +1086,9 @@ def _eval_node_with_mlx(node: Node, values: dict[str, Any], mx: Any) -> Any:
     if op == "broadcast_arrays":
         outputs = mx.broadcast_arrays(*args)
         return outputs[int(attrs.get("input_index", 0))]
+    if op == "broadcast_axes":
+        shape = infer_broadcast_axes_shape([arg.shape for arg in args], attrs.get("ignore_axes", []))
+        return mx.broadcast_to(args[0], shape)
     if op == "tensordot":
         axes = attrs.get("axes", 2)
         return mx.tensordot(args[0], args[1], axes=axes)
