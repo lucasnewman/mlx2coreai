@@ -111,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
     )
     stateful_parser.add_argument("--no-optimize", action="store_true")
+    stateful_parser.add_argument("--gated-delta-implementation", choices=["native", "decomposed"], default="native",
+                                 help="Experimental gated-delta lowering; see docs/qwen35_conversion.md for runtime limitations.")
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
@@ -184,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             dynamic_state=bool(args.dynamic_state),
             cast_bf16_logits_to_fp16=bool(args.cast_bf16_logits_to_fp16),
             config=ConversionConfig(
+                gated_delta_implementation=args.gated_delta_implementation,
                 allow_unknown_sources=bool(args.allow_unknown_sources),
                 capture_is_training=bool(args.capture_is_training),
                 optimize=not bool(args.no_optimize),

@@ -92,6 +92,7 @@ SUPPORTED_MLX_TO_COREAI_OPS: dict[str, str] = {
     "bitwisebinary": "bitwisebinary",
     "scaled_dot_product_attention": "scaled_dot_product_attention",
     "scaleddotproductattention": "scaled_dot_product_attention",
+    "gated_delta_update": "gated_delta_update",
     "rope": "rope",
     "softmax": "softmax",
     "sigmoid": "sigmoid",

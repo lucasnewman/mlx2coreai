@@ -143,6 +143,11 @@ def canonicalize_constant_attrs(graph: Graph) -> Graph:
         op = node.op
         attrs = {str(k): _normalize_attr_value(v) for k, v in node.attrs.items()}
         if op in _CONSTANT_OPS:
+            # Constants are tensor data, not shape attributes. Converting small
+            # arrays to Python lists loses BF16/FP16 dtype and scalar rank.
+            for key in ("value", "val", "data", "tensor"):
+                if isinstance(node.attrs.get(key), (np.ndarray, np.generic)):
+                    attrs[key] = np.asarray(node.attrs[key])
             op = "constant"
             if "value" not in attrs:
                 for key in ("val", "data", "tensor"):
@@ -561,6 +566,11 @@ def _infer_node_spec(node: Node, input_specs: list[InferredTensorSpec]) -> Infer
             out_shape = (x_shape[0], y_shape[1])
         return InferredTensorSpec(shape=out_shape, dtype=_promote_dtype(input_specs[0].dtype, input_specs[1].dtype))
 
+    if mil_op == "gated_delta_update" and len(input_specs) == 6:
+        if int(node.attrs.get("output_index", 0)) == 1:
+            return input_specs[5]
+        return InferredTensorSpec(shape=input_specs[2].shape, dtype=input_specs[0].dtype)
+
     if mil_op == "scaled_dot_product_attention" and len(input_specs) >= 3:
         q_shape = input_specs[0].shape
         v_shape = input_specs[2].shape
@@ -974,6 +984,10 @@ def _infer_node_spec(node: Node, input_specs: list[InferredTensorSpec]) -> Infer
         weight = input_specs[1] if len(input_specs) > 1 else InferredTensorSpec(shape=None, dtype=None)
         if src.shape is None or weight.shape is None:
             return InferredTensorSpec(shape=None, dtype=src.dtype)
+        channels_last = bool(node.attrs.get("channels_last", False))
+        if channels_last:
+            src = InferredTensorSpec(shape=(src.shape[0], src.shape[-1], *src.shape[1:-1]), dtype=src.dtype)
+            weight = InferredTensorSpec(shape=(weight.shape[0], weight.shape[-1], *weight.shape[1:-1]), dtype=weight.dtype)
         spatial = len(src.shape) - 2
         if spatial not in {1, 2, 3} or len(weight.shape) != spatial + 2:
             return InferredTensorSpec(shape=None, dtype=src.dtype)
@@ -998,7 +1012,8 @@ def _infer_node_spec(node: Node, input_specs: list[InferredTensorSpec]) -> Infer
             output_padding=output_padding,
         )
         channels = int(weight.shape[1]) * groups if mil_op == "conv_transpose" else int(weight.shape[0])
-        return InferredTensorSpec(shape=(int(src.shape[0]), channels, *spatial_out), dtype=src.dtype)
+        shape = (int(src.shape[0]), *spatial_out, channels) if channels_last else (int(src.shape[0]), channels, *spatial_out)
+        return InferredTensorSpec(shape=shape, dtype=src.dtype)
 
     if mil_op in {
         "sigmoid",

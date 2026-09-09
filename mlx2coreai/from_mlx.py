@@ -266,6 +266,7 @@ def _primitive_attrs_from_arguments(
             attrs["output_logsumexp"] = bool(state[3])
 
     if op == "convolution" and arguments:
+        attrs["channels_last"] = True
         strides = _int_list(arguments[0])
         if strides is not None:
             attrs["strides"] = strides
@@ -281,7 +282,7 @@ def _primitive_attrs_from_arguments(
             if pad_hi is not None:
                 pad_lo = attrs.get("padding")
                 if isinstance(pad_lo, list) and len(pad_lo) == len(pad_hi):
-                    attrs["padding"] = [int(lo) + int(hi) for lo, hi in zip(pad_lo, pad_hi)]
+                    attrs["padding"] = [int(v) for pair in zip(pad_lo, pad_hi) for v in pair]
 
         if len(arguments) >= 4:
             dilations = _int_list(arguments[3])
@@ -592,6 +593,18 @@ def parse_mlx_export_events_to_graph(
         output_entries_raw = primitive.get("outputs", [])
         arguments = list(primitive.get("arguments", []))
 
+        if (
+            raw_name == "CustomKernel" and arguments
+            and str(arguments[0]).startswith("custom_kernel_gated_delta_step__")
+        ):
+            if len(input_entries_raw) != 7 or len(output_entries_raw) != 2:
+                raise ValueError("Unexpected MLX gated-delta kernel signature.")
+            op = "gated_delta_update"
+            # The exported kernel's scalar T is a trace constant. The composite
+            # derives sequence length from query at runtime instead.
+            input_entries_raw = input_entries_raw[:6]
+            arguments = []
+
         inputs = []
         for entry in input_entries_raw:
             if not isinstance(entry, (tuple, list)) or len(entry) != 3:
@@ -774,7 +787,14 @@ def _capture_graph_from_mlx_function_callback(
     def _callback(payload: dict[str, Any]) -> None:
         events.append(payload)
 
-    mx.export_function(_callback, function, shapeless=bool(shapeless), **mx_inputs)
+    # MLX 0.32.2 cannot serialize Contiguous. It is only a layout hint; CoreAI
+    # chooses its own layouts. Keep the original operation for reference execution.
+    original_contiguous = mx.contiguous
+    try:
+        mx.contiguous = lambda value, *args, **kwargs: value
+        mx.export_function(_callback, function, shapeless=bool(shapeless), **mx_inputs)
+    finally:
+        mx.contiguous = original_contiguous
     parser_specs = input_specs if input_specs is not None else _default_input_specs(numpy_inputs)
     graph = parse_mlx_export_events_to_graph(
         events,
@@ -962,6 +982,11 @@ def _eval_node_with_mlx(node: Node, values: dict[str, Any], mx: Any) -> Any:
     args = [values[name] for name in node.inputs]
     attrs = dict(node.attrs)
     op = node.op
+
+    if op == "gated_delta_update":
+        from mlx_lm.models.gated_delta import gated_delta_ops
+
+        return gated_delta_ops(*args)[int(attrs.get("output_index", 0))]
 
     if op == "add":
         return mx.add(args[0], args[1])

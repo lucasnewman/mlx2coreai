@@ -279,7 +279,20 @@ def _aliases_and_bitwise(seed: int) -> CoverageModelSpec:
     return CoverageModelSpec("supplemental_aliases_and_bitwise", "Alias spellings and bitwise binary", graph)
 
 
+def _gated_delta(seed: int) -> CoverageModelSpec:
+    names = ("q", "k", "v", "decay", "beta", "state")
+    shapes = [(1, -1, 2, 32)] * 3 + [(1, -1, 2)] * 2 + [(1, 2, 32, 32)]
+    graph = Graph(
+        [TensorSpec(name, shape, "fp32") for name, shape in zip(names, shapes, strict=True)],
+        [Node("gated_delta_update", names, "y", attrs={"output_index": 0}),
+         Node("gated_delta_update", names, "s", attrs={"output_index": 1})],
+        ["y", "s"],
+    )
+    return CoverageModelSpec("supplemental_gated_delta", "Experimental dynamic gated-delta composite", graph)
+
+
 _BUILDERS: dict[str, Callable[[int], CoverageModelSpec]] = {
+    "supplemental_gated_delta": _gated_delta,
     "supplemental_aliases_and_bitwise": _aliases_and_bitwise,
     "supplemental_binary_canonical": _binary_canonical,
     "supplemental_unary_canonical": _unary_canonical,

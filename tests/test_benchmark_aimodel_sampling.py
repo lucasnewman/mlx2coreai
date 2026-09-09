@@ -56,7 +56,8 @@ def test_state_allocation_resolves_dynamic_dims_and_preserves_bf16(dynamic_dim):
 @pytest.mark.parametrize("grow", [False, True])
 @pytest.mark.parametrize("os_runtime", [False, True])
 @pytest.mark.parametrize("layout", ["query", "context"])
-def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, grow, os_runtime, layout):
+@pytest.mark.parametrize("recurrent", [False, True])
+def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, grow, os_runtime, layout, recurrent):
     import coreai.authoring
     import coreai.runtime
 
@@ -65,12 +66,14 @@ def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, g
 
     class FakeFunction:
         desc = SimpleNamespace(
-            output_names=["logits"], state_names=["cache"],
+            output_names=["logits"], state_names=["recurrentState" if recurrent else "cache"],
             state_descriptor=lambda name: SimpleNamespace(shape=(1, -1, 1), dtype="float32"),
         )
 
         async def __call__(self, *, inputs, state):
             calls.append((inputs, state))
+            for value in state.values():
+                value.data += 1
             token_ids = inputs["input_ids"].data
             logits = np.zeros((*token_ids.shape, 16), dtype=np.float16)
             logits[0, -1, int(token_ids[0, -1]) + 1] = 10
@@ -102,6 +105,10 @@ def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, g
         "--logits-dir", str(tmp_path / "logits"),
         *(["--grow-context"] if grow else []),
     ])
+    if recurrent and not grow:
+        with pytest.raises(ValueError, match="require --grow-context"):
+            asyncio.run(benchmark.benchmark(args))
+        return
     rows = asyncio.run(benchmark.benchmark(args))
     assert options == ["GPU" if os_runtime else None]
     assert len(calls) == 10
@@ -109,27 +116,30 @@ def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, g
     for index, context in enumerate([2, 4]):
         interval = calls[index * 5:(index + 1) * 5]
         state = interval[0][1]
-        assert all(call[1] is state for call in interval)
-        assert state["cache"].data.shape == (1, context + (4 if grow else 1), 1)
+        assert all(interval[i][1] is state for i in (0, 2, 3, 4))
+        assert (interval[1][1] is state) == (not recurrent)
+        assert all(np.all(value.data == (4 if recurrent else 5)) for value in state.values())
+        assert state["recurrentState" if recurrent else "cache"].data.shape == (1, context + (4 if grow else 1), 1)
         assert interval[0][0]["input_ids"].data.tolist() == [[1] * context]
         lengths = [context, context + 1, context + 1, context + (2 if grow else 1), context + (3 if grow else 1)]
         for step, ((inputs, _), length) in enumerate(zip(interval, lengths, strict=True)):
             expected = [length - 1] if layout == "query" and step > 0 else list(range(length))
             assert inputs["position_ids"].data.tolist() == [expected]
         row = rows[index]
-        assert row.sampled_tokens == [4, 5, 6]
+        expected_tokens = [3, 4, 5] if recurrent else [4, 5, 6]
+        assert row.sampled_tokens == expected_tokens
         assert row.position_start == context
         assert row.position_end == context + (3 if grow else 0)
         logits = np.fromfile(args.logits_dir / f"context_{context}.f32", dtype="<f4")
         assert logits.shape == (16,)
-        assert np.argmax(logits) == 6
+        assert np.argmax(logits) == expected_tokens[-1]
     json_path = tmp_path / "results.json"
     benchmark.write_json(json_path, rows, args)
     payload = json.loads(json_path.read_text())
     assert payload["runtime_backend"] == "python"
     assert payload["fill_token_id"] == 1
     assert payload["position_ids_layout"] == layout
-    assert payload["results"][0]["sampled_tokens"] == [4, 5, 6]
+    assert payload["results"][0]["sampled_tokens"] == expected_tokens
 
 
 def test_swift_backend_forwards_parity_artifacts(monkeypatch, tmp_path):

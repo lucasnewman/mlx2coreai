@@ -124,6 +124,9 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
     print(f"loading executable from {asset_path}", file=sys.stderr)
     async with asset.executable(specialization_options=options) as model:
         function = model.load_function(args.function_name)
+        recurrent = "recurrentState" in function.desc.state_names
+        if recurrent and not args.grow_context:
+            raise ValueError("Recurrent models require --grow-context; repeated positions cannot rewind recurrent state.")
         output_name = args.output_name or first_output_name(function)
         print_table_header()
         for context_length in contexts:
@@ -152,16 +155,21 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
             )
             position = context_length
             for _ in range(args.warmup):
-                outputs = await run_main(
+                # Recurrent state cannot overwrite an old position. Isolate its
+                # warmup; preserve the existing KV-only benchmark convention.
+                warmup_state = ({name: NDArray(value.numpy().copy()) for name, value in state.items()}
+                                if recurrent else state)
+                warmup_outputs = await run_main(
                     function,
                     NDArray,
                     np.asarray([token], dtype=np.int32),
                     decode_position_ids(position, layout=args.position_ids_layout),
-                    state,
+                    warmup_state,
                     input_name=args.input_name,
                     position_ids_name=args.position_ids_name,
                 )
-                token = greedy_token(outputs[output_name].numpy())
+                if not recurrent:
+                    token = greedy_token(warmup_outputs[output_name].numpy())
 
             sampled_tokens: list[int] = []
             start_position = position

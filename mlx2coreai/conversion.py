@@ -29,6 +29,7 @@ class ConversionConfig:
     dynamic_probe_inputs: Mapping[str, Any] | None = None
     capture_is_training: bool = False
     optimize: bool = True
+    gated_delta_implementation: str = "native"
     entrypoint_name: str = "main"
     state_specs: list[StateSpec] | None = None
     externalize_weights: bool = True
@@ -212,6 +213,7 @@ def lower_graph_to_coreai(
         config=CoreAILoweringConfig(
             entrypoint_name=resolved.entrypoint_name,
             optimize=resolved.optimize,
+            gated_delta_implementation=resolved.gated_delta_implementation,
             state_specs=resolved.state_specs,
             constant_inputs=resolved.constant_inputs,
             public_input_names=public_input_names,

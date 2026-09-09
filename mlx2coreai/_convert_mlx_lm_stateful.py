@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import warnings
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -62,12 +63,40 @@ class _CacheLayout:
     num_layers: int
     num_key_value_heads: int
     head_dim: int
+    linear_layers: tuple[bool, ...] = ()
+    conv_shape: tuple[int, int] = (0, 0)
+    recurrent_shape: tuple[int, int, int] = (0, 0, 0)
+
+    @property
+    def num_linear_layers(self) -> int:
+        return sum(self.linear_layers)
 
 
 @dataclass(slots=True)
 class _LayeredKVCacheState:
     keys: Any
     values: Any
+
+
+class _ExportableRecurrentCache:
+    """The unpadded ArraysCache interface used by MLX-LM's hybrid layers."""
+
+    lengths = None
+
+    def __init__(self, conv: Any, recurrent: Any):
+        self.state = [conv, recurrent]
+
+    def __getitem__(self, index: int) -> Any:
+        return self.state[index]
+
+    def __setitem__(self, index: int, value: Any) -> None:
+        self.state[index] = value
+
+    def advance(self, count: int) -> None:
+        pass
+
+    def make_mask(self, count: int) -> None:
+        return None
 
 
 class _ExportableLayeredKVCache:
@@ -152,8 +181,9 @@ def convert_mlx_lm_stateful(
 
     The generated ``.aimodel`` follows the macOS LLM contract used by
     ``coreai-models``: a single dynamic ``main`` entrypoint with ``input_ids``,
-    ``position_ids``, and two mutable KV-cache state tensors named
-    ``keyCache`` and ``valueCache`` by default.
+    ``position_ids``, and mutable KV-cache state tensors named ``keyCache``
+    and ``valueCache`` by default. Hybrid gated-delta models also carry
+    ``convState`` and FP32 ``recurrentState`` tensors.
     """
 
     if max_context_length <= 0:
@@ -169,12 +199,23 @@ def convert_mlx_lm_stateful(
         revision=revision,
         load_fn=load_fn,
     )
+    # MLX-LM exposes Qwen3.5's text decoder inside a multimodal wrapper.
+    if getattr(getattr(model, "args", None), "model_type", None) in {"qwen3_5", "qwen3_5_moe"}:
+        model = getattr(model, "language_model", model)
     if hasattr(model, "eval"):
         model.eval()
 
     layout = _infer_cache_layout(model)
+    if layout.num_linear_layers:
+        warnings.warn(
+            "Hybrid gated-delta export is experimental: macOS 27 build 26A428 has native "
+            "output corruption and decomposed-loop compiler failures. Validate against MLX before use.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     resolved_compute_precision = _resolve_compute_precision(model, compute_precision)
-    _apply_model_compute_precision(model, resolved_compute_precision)
+    if compute_precision != "auto":
+        _apply_model_compute_precision(model, resolved_compute_precision)
     resolved_cache_dtype = _normalize_cache_dtype(cache_dtype or resolved_compute_precision)
     state_specs = _make_state_specs(
         layout,
@@ -228,6 +269,7 @@ def convert_mlx_lm_stateful(
     lowering_config = CoreAILoweringConfig(
         entrypoint_name=entrypoint_name,
         optimize=base_config.optimize,
+        gated_delta_implementation=base_config.gated_delta_implementation,
         state_specs=state_specs,
         constant_inputs=base_config.constant_inputs,
         externalize_weights=base_config.externalize_weights,
@@ -271,6 +313,8 @@ def convert_mlx_lm_stateful(
             "entrypoints": {"main": entrypoint_name},
             "state_count": len(state_specs),
             "num_layers": layout.num_layers,
+            "num_linear_layers": layout.num_linear_layers,
+            "gated_delta_implementation": base_config.gated_delta_implementation,
             "num_key_value_heads": layout.num_key_value_heads,
             "head_dim": layout.head_dim,
             "cast_bf16_logits_to_fp16": bool(cast_bf16_logits_to_fp16),
@@ -284,6 +328,7 @@ def convert_mlx_lm_stateful(
         "inference_summary": main.inference_summary,
     }
 
+    (bundle_path / "conversion.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     return MLXLMStatefulConversion(
         main=main,
         lowered=lowered,
@@ -476,6 +521,7 @@ def _prepare_stateful_entry(
                 position_length=probe_position_length,
                 cache_dtype=cache_dtype,
                 state_context_length=probe_state_context_length,
+                context_state_names=(key_cache_name, value_cache_name),
             )
         else:
             dynamic_axes = None
@@ -501,7 +547,7 @@ def _prepare_stateful_entry(
     )
     graph = _reorder_graph_inputs(
         graph,
-        [input_name, position_ids_name, key_cache_name, value_cache_name],
+        [input_name, position_ids_name, *[spec.name for spec in state_specs]],
     )
     graph = normalize_graph(graph)
     ensure_supported(graph)
@@ -539,18 +585,26 @@ def _stateful_main_capture_function(
             keys=kwargs[key_cache_name],
             values=kwargs[value_cache_name],
         )
-        caches = [
-            _ExportableLayeredKVCache(
-                state,
-                layer_idx=layer_idx,
-                offset=offset,
-            )
-            for layer_idx in range(layout.num_layers)
-        ]
+        caches = []
+        recurrent_caches = []
+        attention_index = 0
+        for is_linear in layout.linear_layers or (False,) * layout.num_layers:
+            if is_linear:
+                index = len(recurrent_caches)
+                cache = _ExportableRecurrentCache(kwargs["convState"][index], kwargs["recurrentState"][index])
+                recurrent_caches.append(cache)
+            else:
+                cache = _ExportableLayeredKVCache(state, layer_idx=attention_index, offset=offset)
+                attention_index += 1
+            caches.append(cache)
         logits = _select_primary_output(model(input_ids, cache=caches))
         if cast_bf16_logits_to_fp16 and "bfloat16" in str(getattr(logits, "dtype", "")).lower():
             logits = logits.astype(mx.float16)
-        return logits, state.keys, state.values
+        outputs = (logits, state.keys, state.values)
+        if recurrent_caches:
+            outputs += (mx.stack([cache[0] for cache in recurrent_caches]),
+                        mx.stack([cache[1] for cache in recurrent_caches]))
+        return outputs
 
     return capture
 
@@ -573,15 +627,15 @@ def _stateful_inputs(
     position_length: int,
     cache_dtype: str,
     state_context_length: int | None = None,
+    context_state_names: tuple[str, str] = ("keyCache", "valueCache"),
 ) -> dict[str, np.ndarray]:
     inputs = lm_inputs.as_dict(input_name=input_name)
     inputs[position_ids_name] = np.arange(int(position_length), dtype=np.int32)[None, :]
-    dtype = _cache_np_dtype(cache_dtype)
     for spec in state_specs:
         shape = list(spec.shape)
-        if state_context_length is not None:
+        if state_context_length is not None and spec.name in context_state_names:
             shape[3] = int(state_context_length)
-        inputs[spec.name] = np.zeros(tuple(shape), dtype=dtype)
+        inputs[spec.name] = np.zeros(tuple(shape), dtype=_cache_np_dtype(spec.dtype))
     return inputs
 
 
@@ -638,11 +692,23 @@ def _infer_cache_layout(model: Any) -> _CacheLayout:
     if layers is None:
         raise ValueError("Could not infer mlx-lm transformer layers for stateful cache conversion.")
     num_layers = len(layers)
+    linear_layers = tuple(bool(getattr(layer, "is_linear", False)) for layer in layers)
+    linear = [layer.linear_attn for layer in layers if getattr(layer, "is_linear", False)]
+    if all(linear_layers):
+        raise ValueError("Stateful conversion requires at least one full-attention layer.")
+    conv_shape = (0, 0)
+    recurrent_shape = (0, 0, 0)
+    if linear:
+        shapes = {(m.conv_kernel_size - 1, m.conv_dim, m.num_v_heads, m.head_v_dim, m.head_k_dim) for m in linear}
+        if len(shapes) != 1:
+            raise ValueError("Hybrid conversion requires uniform gated-delta state shapes.")
+        dims = shapes.pop()
+        conv_shape, recurrent_shape = dims[:2], dims[2:]
     args = getattr(model, "args", None)
     n_kv_heads = getattr(args, "num_key_value_heads", None)
     head_dim = getattr(args, "head_dim", None)
     if n_kv_heads is None or head_dim is None:
-        attn = getattr(layers[0], "self_attn", None) if num_layers else None
+        attn = next((layer.self_attn for layer in layers if hasattr(layer, "self_attn")), None)
         n_kv_heads = n_kv_heads or getattr(attn, "n_kv_heads", None)
         head_dim = head_dim or getattr(args, "hidden_size", None)
         n_heads = getattr(args, "num_attention_heads", None)
@@ -654,6 +720,9 @@ def _infer_cache_layout(model: Any) -> _CacheLayout:
         num_layers=int(num_layers),
         num_key_value_heads=int(n_kv_heads),
         head_dim=int(head_dim),
+        linear_layers=linear_layers,
+        conv_shape=conv_shape,
+        recurrent_shape=recurrent_shape,
     )
 
 
@@ -681,7 +750,11 @@ def _apply_model_compute_precision(model: Any, compute_precision: str) -> None:
         "fp16": mx.float16,
         "fp32": mx.float32,
     }[compute_precision]
-    set_dtype(dtype)
+    predicate = getattr(model, "cast_predicate", None)
+    if predicate is not None:
+        set_dtype(dtype, predicate=predicate)
+    else:
+        set_dtype(dtype)
 
 
 def _iter_model_values(model: Any):
@@ -738,16 +811,22 @@ def _make_state_specs(
     value_cache_name: str,
 ) -> list[StateSpec]:
     shape = (
-        layout.num_layers,
+        layout.num_layers - layout.num_linear_layers,
         int(batch_size),
         layout.num_key_value_heads,
         int(max_context_length),
         layout.head_dim,
     )
-    return [
+    specs = [
         StateSpec(key_cache_name, shape, cache_dtype),
         StateSpec(value_cache_name, shape, cache_dtype),
     ]
+    if layout.num_linear_layers:
+        specs.extend([
+            StateSpec("convState", (layout.num_linear_layers, int(batch_size), *layout.conv_shape), cache_dtype),
+            StateSpec("recurrentState", (layout.num_linear_layers, int(batch_size), *layout.recurrent_shape), "fp32"),
+        ])
+    return specs
 
 
 def _probe_sequence_length(base_length: int, *, max_context_length: int) -> int:
@@ -839,6 +918,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-unknown-sources", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--capture-is-training", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--no-optimize", action="store_true")
+    parser.add_argument("--gated-delta-implementation", choices=["native", "decomposed"], default="native",
+                        help="Experimental gated-delta lowering. Neither path is validated for full Qwen3.5 on build 26A428.")
     return parser.parse_args(argv)
 
 
@@ -865,6 +946,7 @@ def main(argv: list[str] | None = None) -> int:
             externalize_weights=bool(args.externalize_weights),
             external_weight_threshold=int(args.external_weight_threshold),
             optimize=not bool(args.no_optimize),
+            gated_delta_implementation=args.gated_delta_implementation,
         ),
     )
     print(f"Wrote bundle {converted.bundle_path}")

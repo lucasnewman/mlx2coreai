@@ -26,6 +26,14 @@ mlx2coreai convert-mlx-lm-stateful mlx-community/Qwen3-0.6B-bf16 \
 The exported model has one `main` entrypoint with `input_ids`, `position_ids`,
 and mutable `keyCache` / `valueCache` state.
 
+Qwen3.5 hybrid text-decoder export is **experimental, not runtime-validated**.
+It preserves unquantized BF16 weights and adds convolution and FP32 recurrent
+states. The native gated-delta op currently corrupts integrated outputs on
+macOS 27 build 26A428; a dynamic decomposed alternative hits a compiler error
+in the hybrid graph. See [Qwen3.5 conversion notes](docs/qwen35_conversion.md)
+for artifacts, validation commands, and reduced repros. No fixed-length
+execution workaround is used.
+
 ## Benchmark Sampling
 
 ```bash

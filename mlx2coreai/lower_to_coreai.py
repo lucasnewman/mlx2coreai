@@ -90,6 +90,7 @@ class WeightInfo:
 class CoreAILoweringConfig:
     entrypoint_name: str = "main"
     optimize: bool = True
+    gated_delta_implementation: str = "native"
     state_specs: list[StateSpec] | None = None
     constant_inputs: Mapping[str, Any] | None = None
     public_input_names: set[str] | None = None
@@ -420,6 +421,8 @@ def _as_int_list(value: Any, count: int, *, default: int = 1) -> list[int]:
 class CoreAILowerer:
     def __init__(self, config: CoreAILoweringConfig | None = None) -> None:
         self.config = config or CoreAILoweringConfig()
+        if self.config.gated_delta_implementation not in {"native", "decomposed"}:
+            raise ValueError("gated_delta_implementation must be 'native' or 'decomposed'.")
         self.context = Context()
         self.module: Module | None = None
         self.location: Location | None = None
@@ -459,6 +462,7 @@ class CoreAILowerer:
                         graph.validate()
                         ensure_supported(graph)
                         self.env = {}
+                        self._gated_delta_results = {}
                         self.inferred = infer_graph_specs(graph)
                         public_inputs = self._public_inputs(
                             graph,
@@ -749,7 +753,14 @@ class CoreAILowerer:
         if op == "read_state":
             return self.env[node.inputs[0]]
         if op == "write_state":
-            return self.env[node.inputs[1]]
+            state, value = [self.env[name] for name in node.inputs[:2]]
+            if state.type == value.type:
+                return value
+            if (state.type.element_type != value.type.element_type or _rank(state) != _rank(value)
+                    or any(int(a) >= 0 and int(b) >= 0 and a != b
+                           for a, b in zip(state.type.shape, value.type.shape, strict=True))):
+                raise ValueError(f"State update type {value.type} does not match {state.type}.")
+            return _reshape_like(value, state)
         if op == "state_update_masked":
             state = self.env[node.inputs[0]]
             value = self.env[node.inputs[1]]
@@ -904,6 +915,19 @@ class CoreAILowerer:
             return self._lower_layernorm(node)
         if op == "scaled_dot_product_attention":
             return self._lower_sdpa(node)
+        if op == "gated_delta_update":
+            from ._gated_delta import lower_gated_delta_update
+
+            key = tuple(node.inputs)
+            if key not in self._gated_delta_results:
+                self._private_graph_counter += 1
+                self._gated_delta_results[key] = lower_gated_delta_update(
+                    [self.env[name] for name in node.inputs],
+                    module=self.module, graph=self.current_graph,
+                    name=f"__mlx2coreai_gated_delta_update_{self._private_graph_counter}",
+                    implementation=self.config.gated_delta_implementation,
+                )
+            return self._gated_delta_results[key][int(node.attrs.get("output_index", 0))]
         if op == "rope":
             return self._lower_rope(node)
 
@@ -1078,10 +1102,14 @@ class CoreAILowerer:
             dim = int(x.type.shape[axis])
             sizes = [dim // n] * n
         begin = [0] * _rank(x)
-        end = _static_shape(x)
         begin[axis] = sum(sizes[:output_index])
-        end[axis] = begin[axis] + sizes[output_index]
-        return coreai.slice_(x, begin, end, [1] * _rank(x))
+        if dim < 0:
+            raise ValueError("split requires a static split axis; other axes may be dynamic.")
+        end = _value_shape_operand(x, overrides={axis: begin[axis] + sizes[output_index]})
+        result = coreai.slice_(x, begin, end, [1] * _rank(x))
+        shape = [int(d) if int(d) >= 0 else _dim_1d_from_value(x, i) for i, d in enumerate(x.type.shape)]
+        shape[axis] = sizes[output_index]
+        return _reshape_with_mixed_shape(result, shape)
 
     def _lower_slice_update(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]
@@ -1188,7 +1216,7 @@ class CoreAILowerer:
 
     def _lower_take(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]
-        indices = self.env[node.inputs[1]]
+        indices = coreai.cast(self.env[node.inputs[1]], dtype=np.int32)
         rank = _rank(x)
         axis = _normalize_axis(int(node.attrs.get("axis", 0)), rank)
         index_shape = _static_or_dynamic_shape(indices)
@@ -1222,7 +1250,7 @@ class CoreAILowerer:
             return self._lower_take(node)
 
         x = self.env[node.inputs[0]]
-        indices = self.env[node.inputs[1]]
+        indices = coreai.cast(self.env[node.inputs[1]], dtype=np.int32)
         rank = _rank(x)
         axis = _normalize_axis(int(node.attrs.get("axis", 0)), rank)
         slice_shape = list(node.attrs.get("slice_shape", []))
@@ -1636,6 +1664,10 @@ class CoreAILowerer:
         spatial = _rank(x) - 2
         if spatial not in {1, 2, 3}:
             raise ValueError(f"{node.op} node '{node.output}' requires rank 3, 4, or 5 input.")
+        channels_last = bool(node.attrs.get("channels_last", False))
+        if channels_last:
+            perm = np.asarray([0, spatial + 1, *range(1, spatial + 1)], dtype=np.uint32)
+            x, weight = coreai.transpose(x, perm), coreai.transpose(weight, perm)
         strides = _as_int_list(node.attrs.get("strides", node.attrs.get("stride")), spatial, default=1)
         dilations = _as_int_list(node.attrs.get("dilations", node.attrs.get("dilation")), spatial, default=1)
         groups = int(node.attrs.get("groups", 1))
@@ -1645,7 +1677,7 @@ class CoreAILowerer:
                 raise ValueError(f"{node.op} node '{node.output}' does not support nonzero transposed padding yet.")
             x = coreai.pad(
                 x,
-                np.asarray([0, 0, 0, 0, *padding], dtype=np.int32),
+                np.asarray([0, 0, 0, 0, *padding], dtype=np.uint32),
                 coreai.constant(0, dtype=x.type.element_type),
                 "constant",
             )
@@ -1698,8 +1730,10 @@ class CoreAILowerer:
         if bias is not None:
             bias_shape = [1, int(bias.type.shape[0])] + [1] * spatial
             out = coreai.broadcasting_add(out, coreai.reshape(bias, _as_shape_value(bias_shape)))
-        if _rank(out) == 4 and len(_static_shape(self.env[node.inputs[0]])) == 3:
+        if _rank(out) == 4 and _rank(self.env[node.inputs[0]]) == 3:
             out = coreai.shrink_dims(out, [2])
+        if channels_last:
+            out = coreai.transpose(out, np.asarray([0, *range(2, _rank(out)), 1], dtype=np.uint32))
         return out
 
     def _lower_pointwise_conv_transpose(
@@ -1932,7 +1966,10 @@ def _slice_last(x: Value, start: int, end: int) -> Value:
     begin = np.zeros(rank, dtype=np.int32)
     finish = _value_shape_operand(x, overrides={rank - 1: int(end)})
     begin[-1] = int(start)
-    return coreai.slice_(x, begin, finish, np.ones(rank, dtype=np.int32))
+    result = coreai.slice_(x, begin, finish, np.ones(rank, dtype=np.int32))
+    shape = [int(d) if int(d) >= 0 else _dim_1d_from_value(x, i) for i, d in enumerate(x.type.shape)]
+    shape[-1] = int(end) - int(start)
+    return _reshape_with_mixed_shape(result, shape)
 
 
 def _rope_body(
