@@ -22,7 +22,6 @@ from .signature import CaptureSignature
 
 @dataclass(slots=True)
 class ConversionConfig:
-    capture_mode: str = "callback"
     allow_unknown_sources: bool = True
     capture_shapeless: bool = False
     dynamic_axes: DynamicAxes | None = None
@@ -118,7 +117,6 @@ def capture_mlx_graph(
     inputs: Mapping[str, Any],
     *,
     dot_output_path: Path | None = None,
-    capture_mode: str = "callback",
     capture_shapeless: bool = False,
     allow_unknown_sources: bool = True,
     capture_is_training: bool = False,
@@ -132,7 +130,6 @@ def capture_mlx_graph(
             inputs=normalized_inputs,
             function=resolved_capture_function,
             allow_unknown_sources=allow_unknown_sources,
-            capture_mode=capture_mode,
             shapeless=capture_shapeless,
         )
     return CapturedMLXGraph(
@@ -156,7 +153,6 @@ def prepare_mlx_conversion(
         capture_target,
         inputs,
         dot_output_path=dot_output_path,
-        capture_mode=resolved.capture_mode,
         capture_shapeless=resolved.capture_shapeless,
         allow_unknown_sources=resolved.allow_unknown_sources,
         capture_is_training=resolved.capture_is_training,
@@ -169,7 +165,6 @@ def prepare_mlx_conversion(
                 capture_target,
                 resolved.dynamic_probe_inputs,
                 dot_output_path=None,
-                capture_mode=resolved.capture_mode,
                 capture_shapeless=resolved.capture_shapeless,
                 allow_unknown_sources=resolved.allow_unknown_sources,
                 capture_is_training=resolved.capture_is_training,

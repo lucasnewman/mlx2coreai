@@ -1039,7 +1039,6 @@ def _capture_transformer_block(seed: int, artifacts_dir: Path) -> ZooModelSpec:
         inputs=inputs,
         function=lambda x, mask: block(x, mask=mask),
         allow_unknown_sources=True,
-        capture_mode="callback",
     )
 
     return ZooModelSpec(

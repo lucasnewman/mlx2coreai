@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from mlx2coreai.conversion import ConversionConfig, convert_mlx_to_coreai, lower_graph_to_coreai
-from mlx2coreai.from_mlx import _eval_node_with_mlx, parse_mlx_export_events_to_graph
+from mlx2coreai.from_mlx import parse_mlx_export_events_to_graph
 from mlx2coreai.ir import Graph, Node, TensorSpec
 from mlx2coreai.passes import infer_graph_specs
 
@@ -65,7 +65,9 @@ def test_broadcast_axes_export_preserves_axes_and_first_input_dtype(axes):
 
 
 def test_live_mlx_matmul_broadcast_axes_capture(tmp_path: Path):
-    mx = pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx.core")
+    from coreai.runtime import SpecializationOptions
+    from mlx2coreai.runtime import run_aimodel_sync
     converted = convert_mlx_to_coreai(
         lambda x, y: x @ y,
         {"x": np.ones((2, 3), dtype=np.float32), "y": np.ones((5, 3, 4), dtype=np.float32)},
@@ -79,12 +81,14 @@ def test_live_mlx_matmul_broadcast_axes_capture(tmp_path: Path):
         pytest.skip("Installed MLX predates BroadcastAxes export")
     assert len(nodes) == 2
     assert all(node.attrs["ignore_axes"] == [-2, -1] for node in nodes)
-    values = {"x": mx.arange(6).reshape(2, 3), "y": mx.ones((5, 3, 4))}
-    for node in nodes:
-        actual = np.asarray(_eval_node_with_mlx(node, values, mx))
-        source = np.asarray(values[node.inputs[0]])
-        expected_shape = (5, 2, 3) if node.inputs[0] == "x" else (5, 3, 4)
-        np.testing.assert_array_equal(actual, np.broadcast_to(source, expected_shape))
+    rng = np.random.default_rng(7)
+    for rows, batch in ((2, 5), (7, 3)):
+        values = {"x": rng.normal(size=(rows, 3)).astype(np.float32),
+                  "y": rng.normal(size=(batch, 3, 4)).astype(np.float32)}
+        actual = run_aimodel_sync(converted.asset, values,
+                                 specialization_options=SpecializationOptions.cpu_only()).outputs
+        np.testing.assert_allclose(next(iter(actual.values())), values["x"] @ values["y"],
+                                   rtol=2e-6, atol=2e-6)
 
 
 def test_broadcast_axes_uses_lowered_rank_when_graph_inference_is_incomplete(tmp_path: Path):

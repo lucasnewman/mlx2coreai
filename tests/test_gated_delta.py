@@ -73,11 +73,10 @@ def test_gated_delta_dynamic_runtime(tmp_path, sequence, device, dims, implement
     np.testing.assert_allclose(actual["s"], s, rtol=3e-4, atol=2e-6)
 
 
-def test_live_kernel_capture_and_replay(tmp_path):
-    import mlx.core as mx
+def test_live_kernel_capture_and_runtime(tmp_path):
+    from coreai.runtime import SpecializationOptions
     from mlx_lm.models.gated_delta import gated_delta_kernel
-    from mlx2coreai.conversion import ConversionConfig, prepare_mlx_conversion
-    from mlx2coreai.from_mlx import _eval_node_with_mlx
+    from mlx2coreai.conversion import ConversionConfig, convert_mlx_to_coreai
 
     graph = delta_graph(sequence=3)
     rng = np.random.default_rng(5)
@@ -85,15 +84,19 @@ def test_live_kernel_capture_and_replay(tmp_path):
     inputs["decay"] = np.exp(-np.abs(inputs["decay"]))
     def forward(**kwargs):
         return gated_delta_kernel(*[kwargs[spec.name] for spec in graph.inputs])
-    prepared = prepare_mlx_conversion(forward, inputs, config=ConversionConfig(capture_shapeless=True))
+    converted = convert_mlx_to_coreai(
+        forward, inputs, config=ConversionConfig(capture_shapeless=True),
+        output_path=tmp_path / "captured_delta.aimodel",
+    )
+    prepared = converted.prepared
     nodes = [n for n in prepared.normalized_graph.nodes if n.op == "gated_delta_update"]
     assert len(nodes) == 1
     assert len(nodes[0].outputs) == 2
     assert "output_index" not in nodes[0].attrs
     assert all(len(n.inputs) == 6 for n in nodes)
-    values = {name: mx.array(value) for name, value in inputs.items()}
     expected = reference(inputs)
-    for index in range(2):
-        node = Node("gated_delta_update", tuple(inputs), "out", {"output_index": index})
-        np.testing.assert_allclose(np.asarray(_eval_node_with_mlx(node, values, mx)),
-                                   expected[index], rtol=3e-4, atol=2e-6)
+    actual = run_aimodel_sync(converted.asset, inputs,
+                             specialization_options=SpecializationOptions.cpu_only()).outputs
+    for name, reference_output in zip(prepared.normalized_graph.outputs, expected, strict=True):
+        np.testing.assert_allclose(prepared.expected_outputs[name], reference_output, rtol=3e-4, atol=2e-6)
+        np.testing.assert_allclose(actual[name], reference_output, rtol=3e-4, atol=2e-6)

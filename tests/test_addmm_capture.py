@@ -9,7 +9,6 @@ from mlx2coreai.runtime import run_aimodel_sync
 def test_live_addmm_order_and_scaling(tmp_path, alpha, beta):
     import mlx.core as mx
     from coreai.runtime import SpecializationOptions
-    from mlx2coreai._legacy_capture import _eval_node_with_mlx
 
     rng = np.random.default_rng(12)
     inputs = {"x": rng.normal(size=(2, 3)).astype(np.float32),
@@ -30,11 +29,6 @@ def test_live_addmm_order_and_scaling(tmp_path, alpha, beta):
         result = run_aimodel_sync(converted.asset, values,
                                  specialization_options=SpecializationOptions.cpu_only())
         np.testing.assert_allclose(next(iter(result.outputs.values())), expected, atol=2e-6, rtol=2e-6)
-    replay_values = dict(zip(node.inputs, (mx.array(inputs["x"]), mx.array(inputs["w"]),
-                                          mx.array(np.broadcast_to(inputs["b"], (2, 4))))))
-    np.testing.assert_allclose(np.asarray(_eval_node_with_mlx(node, replay_values, mx)),
-                               beta * inputs["b"] + alpha * (inputs["x"] @ inputs["w"]),
-                               atol=2e-6, rtol=2e-6)
 
 
 def test_batched_linear_derived_dynamic_extent(tmp_path):

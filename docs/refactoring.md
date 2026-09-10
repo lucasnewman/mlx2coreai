@@ -2,7 +2,8 @@
 
 This refactor preserves generic MLX, manual IR, stateless and stateful MLX-LM,
 dynamic query/cache dimensions, multiple CoreAI entrypoints, precision policy,
-and Python/Swift execution. Existing public entrypoints remain compatible.
+and Python/Swift execution. The subsequent legacy capture removal is documented
+below as an intentional API break.
 
 ## Stages
 
@@ -47,10 +48,9 @@ MLX callback capture -> dynamic-shape probing -> signature/state binding
     -> analyze_graph -> CoreAI lowering -> asset/bundle writing
 ```
 
-- `from_mlx.py` captures primitives, constants, and tensor types. DOT parsing and
-  reverse-MLX evaluation live in `_legacy_capture.py`, loaded only on request;
-  old capture imports remain available. `reporting.write_graph_dot` renders IR
-  directly without executing MLX.
+- `from_mlx.py` captures primitives, constants, and tensor types through MLX's
+  export callback. Optional DOT output is visualization only;
+  `reporting.write_graph_dot` renders manual IR directly without executing MLX.
 - `conversion.py` owns preparation, lowering, saving, and common metadata.
   `CaptureSignature` binds functional outputs to mutable states before analysis.
   Model adapters describe cache layout and capture the model forward pass rather
@@ -75,9 +75,28 @@ provided by capture. To add a stateful model, extend the model/cache adapter and
 its `StateSpec`/`StateBinding` declarations, not the shared pipeline or runtime.
 
 This is a reduction in duplicated responsibilities, not a promise of fewer total
-lines. Compatibility implementations and regression tests are retained. Dynamic
+lines. Numerical regression tests are retained. Dynamic
 shape probing and precision/compiler guards remain deliberate boundaries; no
 fixed-length execution or relaxed correctness threshold was introduced.
+
+## Legacy Capture Removal
+
+After validating callback capture with LFM, Qwen3, SmartTurn, and Mimi, the legacy
+DOT parser and IR-to-MLX replay interpreter were removed, along with their lazy
+exports from `from_mlx`. This is an intentional compatibility break:
+
+- Remove `capture_mode` from `ConversionConfig`, `capture_mlx_graph`, and
+  `capture_graph_from_mlx_function` calls. Callback capture is now the only path.
+- Replace `capture_graph_from_mlx_outputs` and DOT parsing with callable capture
+  through `capture_graph_from_mlx_function` or `convert_mlx_to_coreai`.
+- Lower an existing `Graph` directly with `lower_graph_to_coreai`; do not replay
+  it through MLX using `capture_graph_from_ir` or `export_dot_from_ir`.
+- Use `reporting.write_graph_dot` for IR visualization. The optional
+  `dot_output_path` on callable capture and conversion remains supported.
+
+Legacy smoke helpers and private replay utilities are also removed. Operator
+tests compare execution against independent numerical references rather than
+maintaining a second implementation of every operation in a replay interpreter.
 
 ## Results
 

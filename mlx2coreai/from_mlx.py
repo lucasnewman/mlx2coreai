@@ -295,7 +295,6 @@ def capture_graph_from_mlx_function(
     *,
     input_specs: list[TensorSpec] | None = None,
     allow_unknown_sources: bool = False,
-    capture_mode: str = "callback",
     shapeless: bool = False,
 ) -> tuple[Graph, dict[str, np.ndarray], dict[str, np.ndarray]]:
     """
@@ -303,10 +302,8 @@ def capture_graph_from_mlx_function(
 
     The callable is invoked as `function(**mx_inputs)`.
 
-    `capture_mode` controls the source graph format:
-    - `callback` (default): uses `mx.export_function(..., callback=...)` and preserves
-      primitive arguments needed for shape ops.
-    - `dot`: preserves legacy `mx.export_to_dot` parsing behavior.
+    Uses `mx.export_function(..., callback=...)` to preserve primitive arguments
+    and tensor metadata. An optional DOT export is for visualization only.
     """
     # MLX import is intentionally lazy to allow non-live operation in restricted envs.
     import mlx.core as mx  # noqa: PLC0415
@@ -314,69 +311,19 @@ def capture_graph_from_mlx_function(
     numpy_inputs = _normalize_numpy_inputs(inputs)
     mx_inputs = {name: mx.array(value) for name, value in numpy_inputs.items()}
 
-    if capture_mode == "callback":
-        return _capture_graph_from_mlx_function_callback(
-            dot_output_path=dot_output_path,
-            numpy_inputs=numpy_inputs,
-            mx_inputs=mx_inputs,
-            function=function,
-            input_specs=input_specs,
-            allow_unknown_sources=allow_unknown_sources,
-            write_dot_debug=dot_output_path is not None,
-            shapeless=shapeless,
-        )
-
-    if capture_mode == "dot":
-        from ._legacy_capture import _capture_graph_from_precomputed_outputs
-
-        outputs = function(**mx_inputs)
-        return _capture_graph_from_precomputed_outputs(
-            dot_output_path=dot_output_path,
-            numpy_inputs=numpy_inputs,
-            mx_inputs=mx_inputs,
-            outputs=outputs,
-            input_specs=input_specs,
-            allow_unknown_sources=allow_unknown_sources,
-        )
-
-    raise ValueError(
-        f"Unsupported capture_mode={capture_mode!r}. Expected one of: 'callback', 'dot'."
+    return _capture_graph_from_mlx_function_callback(
+        dot_output_path=dot_output_path,
+        numpy_inputs=numpy_inputs,
+        mx_inputs=mx_inputs,
+        function=function,
+        input_specs=input_specs,
+        allow_unknown_sources=allow_unknown_sources,
+        write_dot_debug=dot_output_path is not None,
+        shapeless=shapeless,
     )
 
 
-_LEGACY_EXPORTS = {
-    'build_smoke_numpy_inputs',
-    'evaluate_smoke_numpy',
-    'make_mock_smoke_graph',
-    'parse_mlx_dot_to_graph',
-    '_temporary_dot_output_path',
-    '_capture_graph_from_precomputed_outputs',
-    'capture_graph_from_mlx_outputs',
-    'capture_smoke_graph',
-    '_ir_dtype_to_mx',
-    '_as_tuple',
-    '_as_int',
-    '_as_bool',
-    '_conv_padding_from_attrs',
-    '_eval_node_with_mlx',
-    'export_dot_from_ir',
-    'capture_graph_from_ir',
-}
-
-
-def __getattr__(name: str):
-    if name not in _LEGACY_EXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    from . import _legacy_capture
-
-    value = getattr(_legacy_capture, name)
-    globals()[name] = value
-    return value
-
-
-def __dir__():
-    return sorted(set(globals()) | _LEGACY_EXPORTS)
-
-
-__all__ = ["Graph", "Node", "TensorSpec", "TensorType", "parse_mlx_export_events_to_graph",
-           "capture_graph_from_mlx_function", *sorted(name for name in _LEGACY_EXPORTS if not name.startswith("_"))]
+__all__ = [
+    "Graph", "Node", "TensorSpec", "TensorType",
+    "parse_mlx_export_events_to_graph", "capture_graph_from_mlx_function",
+]
