@@ -41,7 +41,8 @@ completion, cancellation, or exceptions. Stateful recipes reset buffers at
 the start of each request. Requests in one session must be serial; independent
 concurrent requests need independent sessions.
 
-Mimi returns a NumPy array per request, language-model recipes yield token IDs,
+Mimi returns a NumPy array per request, SmartTurn returns a dictionary of NumPy
+logits, probabilities, and predictions, language-model recipes yield token IDs,
 and Pocket TTS yields NumPy audio chunks. Language models and Pocket TTS accept
 an optional `report={}` argument to collect generation statistics when the
 request completes.

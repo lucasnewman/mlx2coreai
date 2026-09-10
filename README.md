@@ -45,9 +45,7 @@ Each guide includes setup, build, run, and validation instructions.
 | [LFM2 / LFM2.5](recipes/lfm2/README.md) | Dense and MoE text generation | Full-model parity unresolved; MoE experimental |
 | [Mimi](recipes/mimi/README.md) | Offline audio encode/decode | FP32; not streaming |
 | [Pocket TTS](recipes/pocket_tts/README.md) | Stateful streaming speech generation | FP32; precomputed voices |
-
-[SmartTurn conversion](docs/audio_recipes.md#smartturn) is available separately
-through a validation script.
+| [SmartTurn v3](recipes/smart_turn/README.md) | Speech endpoint detection from mel features | FP32; dynamic batches; preprocessing outside asset |
 
 ## Further Usage
 

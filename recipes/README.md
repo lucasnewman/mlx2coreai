@@ -11,10 +11,10 @@ executes a request. Start with the guide for your model.
 | [LFM2 / LFM2.5](lfm2/README.md) | `LiquidAI/LFM2.5-2.6B-MLX-bf16` | Token IDs; parity unresolved |
 | [Mimi](mimi/README.md) | Local Mimi codec checkpoint | Offline codes or audio arrays |
 | [Pocket TTS](pocket_tts/README.md) | `mlx-community/pocket-tts` | Streaming audio chunks |
+| [SmartTurn v3](smart_turn/README.md) | `mlx-community/smart-turn-v3` | Logits, probabilities, and endpoint decisions |
 
 Each README covers dependencies, build/run examples, validation, and known
-limitations. LFM2 MoE instructions are in the LFM guide. SmartTurn is
-[script-based](../docs/audio_recipes.md#smartturn), not a recipe.
+limitations. LFM2 MoE instructions are in the LFM guide.
 
 ## Shared Conventions
 
