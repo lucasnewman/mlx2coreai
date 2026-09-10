@@ -98,7 +98,7 @@ def test_tiny_qwen35_dynamic_prefill_and_decode(tmp_path):
     import mlx.core as mx
     from mlx_lm.models.qwen3_5 import TextModel, TextModelArgs
     from coreai.runtime import NDArray, SpecializationOptions, ComputeUnitKind
-    from scripts.benchmark_aimodel_sampling import allocate_state, run_main
+    from mlx2coreai.runtime import allocate_state, run_main
 
     if not SpecializationOptions.is_supported():
         pytest.skip("requires macOS 27 OS runtime")

@@ -15,13 +15,20 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import ml_dtypes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mlx2coreai._convert_mlx_lm import build_mlx_lm_inputs, load_mlx_lm_model
+from mlx2coreai.bundle import resolve_bundle_path
+from mlx2coreai.runtime import (
+    CoreAISession,
+    allocate_state,
+    resolve_asset_path,
+    run_main,
+    _runtime_dtype_to_numpy,
+)
 
 
 @dataclass(slots=True)
@@ -105,10 +112,8 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
             file=sys.stderr,
         )
 
-    from coreai.authoring import AIModelAsset  # noqa: PLC0415
-    from coreai.runtime import NDArray, SpecializationOptions  # noqa: PLC0415
+    from coreai.runtime import SpecializationOptions  # noqa: PLC0415
 
-    asset = AIModelAsset.load(asset_path)
     rng = np.random.default_rng(args.seed)
     rows: list[StatefulBenchmarkRow] = []
 
@@ -122,8 +127,8 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
         print("Python CoreAI local runtime (no delegate specialization)", file=sys.stderr)
 
     print(f"loading executable from {asset_path}", file=sys.stderr)
-    async with asset.executable(specialization_options=options) as model:
-        function = model.load_function(args.function_name)
+    async with CoreAISession(asset_path, function_name=args.function_name, specialization_options=options) as session:
+        function = session.function
         recurrent = bool({"recurrentState", "convState"}.intersection(function.desc.state_names))
         if recurrent and not args.grow_context:
             raise ValueError("Recurrent models require --grow-context; repeated positions cannot rewind recurrent state.")
@@ -131,19 +136,16 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
         print_table_header()
         for context_length in contexts:
             state_capacity = context_length + (args.steps + 1 if args.grow_context else 1)
-            state = allocate_state(function, NDArray, state_capacity=state_capacity)
+            session.reset_state(state_capacity=state_capacity)
             token_ids = context_token_ids(
                 context_length,
                 tokenizer=tokenizer,
                 prompt=args.prompt,
                 fill_token_id=args.fill_token_id,
             )
-            outputs = await run_main(
-                function,
-                NDArray,
+            outputs = await session.run_tokens(
                 token_ids,
                 np.arange(context_length, dtype=np.int32),
-                state,
                 input_name=args.input_name,
                 position_ids_name=args.position_ids_name,
             )
@@ -157,14 +159,11 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
             for _ in range(args.warmup):
                 # Recurrent state cannot overwrite an old position. Isolate its
                 # warmup; preserve the existing KV-only benchmark convention.
-                warmup_state = ({name: NDArray(value.numpy().copy()) for name, value in state.items()}
-                                if recurrent else state)
-                warmup_outputs = await run_main(
-                    function,
-                    NDArray,
+                warmup_state = session.clone_state() if recurrent else session.state
+                warmup_outputs = await session.run_tokens(
                     np.asarray([token], dtype=np.int32),
                     decode_position_ids(position, layout=args.position_ids_layout),
-                    warmup_state,
+                    state=warmup_state,
                     input_name=args.input_name,
                     position_ids_name=args.position_ids_name,
                 )
@@ -175,12 +174,9 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
             start_position = position
             start = time.perf_counter()
             for _ in range(args.steps):
-                outputs = await run_main(
-                    function,
-                    NDArray,
+                outputs = await session.run_tokens(
                     np.asarray([token], dtype=np.int32),
                     decode_position_ids(position, layout=args.position_ids_layout),
-                    state,
                     input_name=args.input_name,
                     position_ids_name=args.position_ids_name,
                 )
@@ -217,79 +213,12 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
     return rows
 
 
-def resolve_asset_path(path: Path) -> Path:
-    if path.suffix == ".aimodel":
-        return path
-    metadata_path = path / "metadata.json"
-    if metadata_path.exists():
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        asset_name = metadata.get("assets", {}).get("main")
-        if not isinstance(asset_name, str):
-            raise ValueError(f"{metadata_path} does not contain assets.main.")
-        return path / asset_name
-    candidates = sorted(path.glob("*.aimodel")) if path.is_dir() else []
-    if len(candidates) == 1:
-        return candidates[0]
-    raise ValueError(f"Could not resolve .aimodel asset from {path}.")
-
-
-def resolve_bundle_path(path: Path, *, asset_path: Path) -> Path | None:
-    if path.is_dir() and (path / "tokenizer").is_dir():
-        return path
-    if asset_path.parent.is_dir() and (asset_path.parent / "tokenizer").is_dir():
-        return asset_path.parent
-    return None
-
-
-async def run_main(
-    function: Any,
-    NDArray: Any,
-    token_ids: np.ndarray,
-    position_ids: np.ndarray,
-    state: dict[str, Any],
-    *,
-    input_name: str,
-    position_ids_name: str,
-) -> dict[str, Any]:
-    return await function(
-        inputs={
-            input_name: NDArray(np.asarray(token_ids, dtype=np.int32)[None, :]),
-            position_ids_name: NDArray(np.asarray(position_ids, dtype=np.int32)[None, :]),
-        },
-        state=state,
-    )
-
 
 def decode_position_ids(position: int, *, layout: str) -> np.ndarray:
     # The stateful exporter reads max(position_ids), not the vector length.
     # Keep one position per query token to avoid preparing a new input shape at every step.
     start = position if layout == "query" else 0
     return np.arange(start, position + 1, dtype=np.int32)
-
-
-def allocate_state(function: Any, NDArray: Any, *, state_capacity: int) -> dict[str, Any]:
-    state: dict[str, Any] = {}
-    for name in function.desc.state_names:
-        descriptor = function.desc.state_descriptor(name=name)
-        shape = tuple(
-            int(state_capacity) if dim is None or int(dim) < 0 else int(dim)
-            for dim in descriptor.shape
-        )
-        state[name] = NDArray(np.zeros(shape, dtype=_runtime_dtype_to_numpy(descriptor.dtype)))
-    return state
-
-
-def _runtime_dtype_to_numpy(dtype: Any) -> Any:
-    text = str(dtype).strip().lower()
-    if "bfloat16" in text or "bf16" in text:
-        return ml_dtypes.bfloat16
-    if "float16" in text or "fp16" in text:
-        return np.float16
-    if "float32" in text or "fp32" in text:
-        return np.float32
-    if "int32" in text:
-        return np.int32
-    raise ValueError(f"Unsupported runtime state dtype: {dtype!r}.")
 
 
 def first_output_name(function: Any) -> str:

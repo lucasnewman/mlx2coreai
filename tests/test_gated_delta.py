@@ -87,7 +87,9 @@ def test_live_kernel_capture_and_replay(tmp_path):
         return gated_delta_kernel(*[kwargs[spec.name] for spec in graph.inputs])
     prepared = prepare_mlx_conversion(forward, inputs, config=ConversionConfig(capture_shapeless=True))
     nodes = [n for n in prepared.normalized_graph.nodes if n.op == "gated_delta_update"]
-    assert len(nodes) == 2
+    assert len(nodes) == 1
+    assert len(nodes[0].outputs) == 2
+    assert "output_index" not in nodes[0].attrs
     assert all(len(n.inputs) == 6 for n in nodes)
     values = {name: mx.array(value) for name, value in inputs.items()}
     expected = reference(inputs)

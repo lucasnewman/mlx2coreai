@@ -2,34 +2,37 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import warnings
 from dataclasses import dataclass, replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-import ml_dtypes
 import numpy as np
 
+from .bundle import (
+    _resolve_bundle_paths,
+    _write_coreai_models_bundle,
+    _write_tokenizer,
+    _build_bundle_metadata,
+    _vocab_size,
+)
+from .dtypes import (
+    normalize_compute_precision as _normalize_cache_dtype,
+    floating_precision as _dtype_to_precision,
+    cast_model_precision as _apply_model_compute_precision,
+    cache_numpy_dtype as _cache_np_dtype,
+)
 from ._convert_mlx_lm import MLXLMConversionInputs, build_mlx_lm_inputs, load_mlx_lm_model
 from .conversion import (
-    CapturedMLXGraph,
     ConversionConfig,
     PreparedMLXGraph,
-    find_extra_input_names,
+    convert_prepared_mlx_to_coreai,
     prepare_mlx_conversion,
 )
 from .dynamic_shapes import DynamicAxes
-from .ir import Graph, Node, StateSpec
-from .lower_to_coreai import (
-    CoreAILoweringConfig,
-    LoweredCoreAIProgram,
-    build_coreai_program,
-    save_coreai_program,
-)
-from .op_registry import ensure_supported, unsupported_op_details
-from .passes import infer_graph_specs, normalize_graph, summarize_inference
+from .ir import Graph, StateSpec
+from .lower_to_coreai import LoweredCoreAIProgram
+from .signature import CaptureSignature, StateBinding
 
 
 TRACE_QUERY_LENGTH = 16
@@ -276,23 +279,16 @@ def convert_mlx_lm_stateful(
         dynamic_state=bool(dynamic_state),
     )
 
-    lowering_config = CoreAILoweringConfig(
+    conversion_config = replace(
+        main.config or base_config,
         entrypoint_name=entrypoint_name,
-        optimize=base_config.optimize,
-        gated_delta_implementation=base_config.gated_delta_implementation,
         state_specs=state_specs,
-        constant_inputs=base_config.constant_inputs,
-        externalize_weights=base_config.externalize_weights,
-        external_weight_threshold=base_config.external_weight_threshold,
-    )
-    lowered = build_coreai_program(
-        main.normalized_graph,
-        config=lowering_config,
     )
 
     bundle_path, asset_path, bundle_name = _resolve_bundle_paths(output_path)
     bundle_path.mkdir(parents=True, exist_ok=True)
-    asset = save_coreai_program(lowered.program, asset_path)
+    converted = convert_prepared_mlx_to_coreai(main, config=conversion_config, output_path=asset_path)
+    lowered, asset = converted.lowered, converted.asset
     bundle_metadata = _write_coreai_models_bundle(
         bundle_path,
         tokenizer=tokenizer,
@@ -305,6 +301,7 @@ def convert_mlx_lm_stateful(
         entrypoint_name=entrypoint_name,
     )
     metadata = {
+        **converted.metadata,
         "mlx_lm_stateful": {
             "model_id": model_id,
             "revision": revision,
@@ -333,11 +330,7 @@ def convert_mlx_lm_stateful(
         },
         "coreai_models_bundle": bundle_metadata,
         "entrypoint_names": list(lowered.entrypoint_names),
-        "optimized": bool(lowered.optimized),
-        "optimization_skip_reason": lowered.optimization_skip_reason,
         "state_specs": [spec.to_dict() for spec in state_specs],
-        "weight_manifest": [entry.to_dict() for entry in lowered.weight_manifest],
-        "inference_summary": main.inference_summary,
     }
 
     (bundle_path / "conversion.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -355,125 +348,9 @@ def convert_mlx_lm_stateful(
     )
 
 
-def _resolve_bundle_paths(output_path: str | Path) -> tuple[Path, Path, str]:
-    path = Path(output_path)
-    if path.suffix == ".aimodel":
-        name = path.stem
-        bundle_path = path.with_suffix("")
-        asset_path = bundle_path / path.name
-    else:
-        name = path.name
-        bundle_path = path
-        asset_path = bundle_path / f"{name}.aimodel"
-    return bundle_path, asset_path, name
 
 
-def _write_coreai_models_bundle(
-    bundle_path: Path,
-    *,
-    tokenizer: Any | None,
-    model: Any,
-    model_id: str,
-    revision: str | None,
-    name: str,
-    asset_path: Path,
-    max_context_length: int,
-    entrypoint_name: str,
-) -> dict[str, Any]:
-    tokenizer_dir = bundle_path / "tokenizer"
-    _write_tokenizer(tokenizer_dir, tokenizer=tokenizer, model_id=model_id, revision=revision)
-    metadata = _build_bundle_metadata(
-        tokenizer=tokenizer,
-        model=model,
-        model_id=model_id,
-        name=name,
-        asset_name=asset_path.name,
-        max_context_length=max_context_length,
-        entrypoint_name=entrypoint_name,
-    )
-    (bundle_path / "metadata.json").write_text(
-        json.dumps(metadata, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return metadata
 
-
-def _write_tokenizer(
-    dest: Path,
-    *,
-    tokenizer: Any | None,
-    model_id: str,
-    revision: str | None,
-) -> None:
-    if dest.exists():
-        shutil.rmtree(dest)
-    save_pretrained = getattr(tokenizer, "save_pretrained", None)
-    if callable(save_pretrained):
-        save_pretrained(str(dest))
-        return
-    try:
-        from transformers import AutoTokenizer  # noqa: PLC0415
-    except Exception as exc:
-        raise RuntimeError(
-            "Could not save tokenizer: mlx-lm did not return a tokenizer with "
-            "save_pretrained(), and transformers is not importable."
-        ) from exc
-    kwargs: dict[str, Any] = {}
-    if revision is not None:
-        kwargs["revision"] = revision
-    AutoTokenizer.from_pretrained(model_id, **kwargs).save_pretrained(str(dest))
-
-
-def _build_bundle_metadata(
-    *,
-    tokenizer: Any | None,
-    model: Any,
-    model_id: str,
-    name: str,
-    asset_name: str,
-    max_context_length: int,
-    entrypoint_name: str,
-) -> dict[str, Any]:
-    return {
-        "metadata_version": "0.2",
-        "kind": "llm",
-        "name": name,
-        "assets": {"main": asset_name},
-        "language": {
-            "tokenizer": model_id,
-            "vocab_size": _vocab_size(tokenizer, model),
-            "max_context_length": int(max_context_length),
-            "embedded_tokenizer": True,
-            "function_map": {"main": [entrypoint_name]},
-        },
-        "source": {
-            "model_definition": "mlx",
-            "hf_model_id": model_id,
-        },
-        "compression": None,
-        "compilation": {
-            "date": datetime.now().astimezone().isoformat(),
-            "targets": [],
-        },
-    }
-
-
-def _vocab_size(tokenizer: Any | None, model: Any) -> int | None:
-    for obj in (getattr(model, "args", None), getattr(model, "config", None), model, tokenizer):
-        if obj is None:
-            continue
-        value = getattr(obj, "vocab_size", None)
-        if value is not None:
-            return int(value)
-    get_vocab = getattr(tokenizer, "get_vocab", None)
-    if callable(get_vocab):
-        return len(get_vocab())
-    if tokenizer is not None:
-        try:
-            return len(tokenizer)
-        except TypeError:
-            pass
-    return None
 
 
 def _prepare_stateful_entry(
@@ -510,8 +387,9 @@ def _prepare_stateful_entry(
             dynamic_axes_dict[input_name] = [1]
             dynamic_axes_dict[position_ids_name] = [1]
         if dynamic_state:
-            dynamic_axes_dict[key_cache_name] = [3]
-            dynamic_axes_dict[value_cache_name] = [3]
+            dynamic_axes_dict.update({
+                spec.name: [spec.capacity_axis] for spec in state_specs if spec.capacity_axis is not None
+            })
         dynamic_axes = dynamic_axes_dict
         probe_length = _probe_sequence_length(
             int(lm_inputs.input_ids.shape[1]),
@@ -544,36 +422,17 @@ def _prepare_stateful_entry(
         dynamic_axes=dynamic_axes,
         dynamic_probe_inputs=dynamic_probe_inputs,
         state_specs=state_specs,
+        signature=CaptureSignature(
+            input_order=(input_name, position_ids_name, *(spec.name for spec in state_specs)),
+            states=tuple(StateBinding(spec, index + 1) for index, spec in enumerate(state_specs)),
+            output_count=1 + len(state_specs),
+        ),
     )
-    prepared = prepare_mlx_conversion(
+    return prepare_mlx_conversion(
         model,
         inputs,
         config=stateful_config,
         capture_function=capture_function,
-    )
-    graph, expected_outputs = _add_state_writes(
-        prepared.normalized_graph,
-        prepared.expected_outputs,
-        state_specs=state_specs,
-        non_state_output_count=1,
-    )
-    graph = _reorder_graph_inputs(
-        graph,
-        [input_name, position_ids_name, *[spec.name for spec in state_specs]],
-    )
-    graph = normalize_graph(graph)
-    ensure_supported(graph)
-    return PreparedMLXGraph(
-        captured=CapturedMLXGraph(
-            graph=graph,
-            normalized_inputs=prepared.normalized_inputs,
-            expected_outputs=expected_outputs,
-        ),
-        normalized_graph=graph,
-        expected_outputs=expected_outputs,
-        inference_summary=summarize_inference(infer_graph_specs(graph)),
-        unsupported_details=unsupported_op_details(graph),
-        extra_input_names=find_extra_input_names(graph, prepared.normalized_inputs),
     )
 
 
@@ -654,8 +513,8 @@ def _stateful_inputs(
     inputs = lm_inputs.as_dict(input_name=input_name)
     inputs[position_ids_name] = np.arange(int(position_length), dtype=np.int32)[None, :]
     for spec in state_specs:
-        shape = list(spec.shape)
-        if state_context_length is not None and spec.name in context_state_names:
+        shape = list(spec.resolved_shape(state_context_length))
+        if state_context_length is not None and spec.capacity_axis is None and spec.name in context_state_names:
             shape[3] = int(state_context_length)
         inputs[spec.name] = np.zeros(tuple(shape), dtype=_cache_np_dtype(spec.dtype))
     return inputs
@@ -668,43 +527,21 @@ def _add_state_writes(
     state_specs: list[StateSpec],
     non_state_output_count: int,
 ) -> tuple[Graph, dict[str, np.ndarray]]:
-    original_outputs = list(graph.outputs)
-    non_state_outputs = original_outputs[:non_state_output_count]
-    state_value_outputs = original_outputs[non_state_output_count:]
-    if len(state_value_outputs) != len(state_specs):
+    if len(graph.outputs) - non_state_output_count != len(state_specs):
         raise ValueError(
             "stateful capture returned "
-            f"{len(state_value_outputs)} state outputs for {len(state_specs)} state specs."
+            f"{len(graph.outputs) - non_state_output_count} state outputs for {len(state_specs)} state specs."
         )
-    nodes = list(graph.nodes)
-    rewritten_outputs = list(non_state_outputs)
-    rewritten_expected = {name: np.asarray(expected_outputs[name]) for name in non_state_outputs}
-    for spec, value_name in zip(state_specs, state_value_outputs, strict=True):
-        output_name = f"{spec.name}__updated"
-        nodes.append(
-            Node(
-                "write_state",
-                (spec.name, value_name),
-                output_name,
-                attrs={"coreai_output_name": spec.name},
-                source="mlx2coreai:stateful_kv_cache",
-            )
-        )
-        rewritten_outputs.append(output_name)
-        rewritten_expected[output_name] = np.asarray(expected_outputs[value_name])
-    rewritten = Graph(inputs=list(graph.inputs), nodes=nodes, outputs=rewritten_outputs)
-    rewritten.validate()
-    return rewritten, rewritten_expected
+    return CaptureSignature(states=tuple(
+        StateBinding(spec, index + non_state_output_count) for index, spec in enumerate(state_specs)
+    )).bind(graph, expected_outputs)
 
 
 def _reorder_graph_inputs(graph: Graph, preferred_order: list[str]) -> Graph:
-    by_name = {spec.name: spec for spec in graph.inputs}
-    ordered = [by_name[name] for name in preferred_order if name in by_name]
-    ordered_names = {spec.name for spec in ordered}
-    ordered.extend(spec for spec in graph.inputs if spec.name not in ordered_names)
-    out = Graph(inputs=ordered, nodes=list(graph.nodes), outputs=list(graph.outputs))
-    out.validate()
-    return out
+    present = {spec.name for spec in graph.inputs}
+    order = tuple(name for name in preferred_order if name in present)
+    reordered, _ = CaptureSignature(input_order=order).bind(graph, dict.fromkeys(graph.outputs))
+    return reordered
 
 
 def _infer_cache_layout(model: Any) -> _CacheLayout:
@@ -773,31 +610,6 @@ def _resolve_compute_precision(model: Any, compute_precision: str) -> str:
     return "fp32"
 
 
-def _apply_model_compute_precision(model: Any, compute_precision: str) -> None:
-    set_dtype = getattr(model, "set_dtype", None)
-    if not callable(set_dtype):
-        return
-    try:
-        import mlx.core as mx  # noqa: PLC0415
-    except ImportError:
-        return
-    dtype = {
-        "bf16": mx.bfloat16,
-        "fp16": mx.float16,
-        "fp32": mx.float32,
-    }[compute_precision]
-    predicate = getattr(model, "cast_predicate", None)
-    if predicate is not None:
-        set_dtype(dtype, predicate=predicate)
-    else:
-        set_dtype(dtype)
-    # Do not capture lazy parameter casts on the first shape but materialized
-    # weights on the probe shape: the two graphs must have the same structure.
-    parameters = getattr(model, "parameters", None)
-    if callable(parameters):
-        mx.eval(parameters())
-
-
 def _iter_model_values(model: Any):
     params_fn = getattr(model, "parameters", None)
     if callable(params_fn):
@@ -814,32 +626,6 @@ def _flatten_tree(value: Any):
             yield from _flatten_tree(item)
         return
     yield value
-
-
-def _dtype_to_precision(dtype: Any) -> str | None:
-    if dtype is None:
-        return None
-    text = str(dtype).strip().lower()
-    if "bfloat16" in text or "bf16" in text:
-        return "bf16"
-    if "float16" in text or "fp16" in text:
-        return "fp16"
-    if "float32" in text or "fp32" in text:
-        return "fp32"
-    return None
-
-
-def _normalize_cache_dtype(dtype: str) -> str:
-    normalized = dtype.strip().lower()
-    if normalized == "auto":
-        return "auto"
-    if normalized in {"fp32", "float32"}:
-        return "fp32"
-    if normalized in {"fp16", "float16"}:
-        return "fp16"
-    if normalized in {"bf16", "bfloat16"}:
-        return "bf16"
-    raise ValueError(f"Unsupported compute/cache dtype: {dtype!r}.")
 
 
 def _make_state_specs(
@@ -859,8 +645,8 @@ def _make_state_specs(
         layout.head_dim,
     )
     specs = [
-        StateSpec(key_cache_name, shape, cache_dtype),
-        StateSpec(value_cache_name, shape, cache_dtype),
+        StateSpec(key_cache_name, shape, cache_dtype, capacity_axis=3),
+        StateSpec(value_cache_name, shape, cache_dtype, capacity_axis=3),
     ]
     if layout.num_conv_layers:
         specs.append(StateSpec("convState", (layout.num_conv_layers, int(batch_size), *layout.conv_shape), cache_dtype))
@@ -905,17 +691,6 @@ def _resize_lm_inputs(
         padded_token_count=max(0, target - inputs.token_count),
         synthetic=inputs.synthetic,
     )
-
-
-def _cache_np_dtype(dtype: str) -> Any:
-    normalized = dtype.strip().lower()
-    if normalized in {"fp32", "float32"}:
-        return np.float32
-    if normalized in {"fp16", "float16"}:
-        return np.float16
-    if normalized in {"bf16", "bfloat16"}:
-        return ml_dtypes.bfloat16
-    raise ValueError(f"Unsupported cache dtype: {dtype!r}.")
 
 
 def _select_primary_output(value: Any) -> Any:

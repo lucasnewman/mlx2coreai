@@ -5,6 +5,15 @@ Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) 
 `mlx2coreai` captures MLX graphs, lowers supported ops to CoreAI MLIR, and writes
 `.aimodel` assets or coreai-models-style LLM bundles.
 
+See the [architecture and refactoring notes](docs/refactoring.md) for the
+conversion pipeline, extension points, and full-model correctness gates.
+Post-refactor [Qwen and SmartTurn validation](docs/qwen_smart_turn_validation.md)
+records numerical results and the SmartTurn optimizer limitation.
+
+Mimi's offline FP32 encoder and decoder from mlx-audio also convert with dynamic
+sequence lengths. See [Mimi conversion](docs/mimi_conversion.md) for validated
+artifacts, reproduction commands, and the separate streaming work still needed.
+
 ## Install
 
 ```bash
@@ -109,6 +118,25 @@ print(converted.asset_path)
 ```
 
 ## Run an Asset
+
+For repeated calls, `CoreAISession` keeps the executable and state alive. The
+benchmark and validator use this same API; existing one-shot helpers remain
+available. State is reset between independent sequences, not between decode
+steps. Results remain CoreAI NDArrays until explicitly read back.
+
+```python
+from coreai.runtime import ComputeUnitKind, SpecializationOptions
+from mlx2coreai import CoreAISession
+
+options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
+
+async def decode(token_ids, position_ids):
+    async with CoreAISession("artifacts/qwen", specialization_options=options) as session:
+        session.reset_state(state_capacity=2048)
+        outputs = await session.run_tokens(token_ids, position_ids)
+        # Continue calling run_tokens in this session to preserve cache history.
+        return outputs
+```
 
 When the local CoreAI runtime is available:
 

@@ -6,7 +6,8 @@ from typing import Callable
 
 import numpy as np
 
-from mlx2coreai.from_mlx import capture_graph_from_mlx_function, export_dot_from_ir
+from mlx2coreai.from_mlx import capture_graph_from_mlx_function
+from mlx2coreai.reporting import write_graph_dot
 from mlx2coreai.ir import Graph, Node, TensorSpec
 
 
@@ -130,6 +131,9 @@ def _build_reduction_suite(seed: int) -> ZooModelSpec:
             Node("prod", ("x",), "prod_out", attrs={"axes": [2], "keep_dims": False}),
             Node("argmax", ("x",), "argmax_out", attrs={"axis": 2, "keep_dims": False}),
             Node("argmin", ("x",), "argmin_out", attrs={"axis": 1, "keep_dims": True}),
+            Node("argreduce", ("x",), "argreduce_out", attrs={"mode": 0, "axis": 2, "keep_dims": True}),
+            Node("constant", (), "pad_value", attrs={"value": np.array(0, np.float32)}),
+            Node("pad", ("x", "pad_value"), "padded", attrs={"padding": [0, 0, 0, 0, 1, 2]}),
         ],
         outputs=[
             "sum_out",
@@ -139,6 +143,8 @@ def _build_reduction_suite(seed: int) -> ZooModelSpec:
             "prod_out",
             "argmax_out",
             "argmin_out",
+            "argreduce_out",
+            "padded",
         ],
     )
     graph.validate()
@@ -151,6 +157,8 @@ def _build_reduction_suite(seed: int) -> ZooModelSpec:
         "prod_out": np.prod(x, axis=2),
         "argmax_out": np.argmax(x, axis=2).astype(np.int32),
         "argmin_out": np.expand_dims(np.argmin(x, axis=1).astype(np.int32), axis=1),
+        "argreduce_out": np.argmin(x, axis=2, keepdims=True).astype(np.int32),
+        "padded": np.pad(x, ((0, 0), (0, 0), (1, 2))),
     }
     return ZooModelSpec(
         name="reduction_suite",
@@ -1098,15 +1106,11 @@ def capture_model_spec(
 
     static_spec = get_model_spec(name, seed=seed)
     if write_debug_dot:
-        export_dot_from_ir(
-            dot_output_path=artifacts_dir / "capture_graph.dot",
-            graph=static_spec.graph,
-            inputs=static_spec.inputs,
-        )
+        write_graph_dot(artifacts_dir / "capture_graph.dot", static_spec.graph)
 
     return ZooModelSpec(
         name=static_spec.name,
-        description=f"{static_spec.description} (live-captured)",
+        description=f"{static_spec.description} (IR fixture)",
         graph=static_spec.graph,
         inputs=static_spec.inputs,
         expected=static_spec.expected,

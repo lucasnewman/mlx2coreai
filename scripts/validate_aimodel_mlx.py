@@ -11,22 +11,21 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.benchmark_aimodel_sampling import allocate_state, resolve_asset_path, run_main
-from mlx2coreai._convert_mlx_lm_stateful import _apply_model_compute_precision
+from mlx2coreai.runtime import CoreAISession
+from mlx2coreai.dtypes import cast_model_precision
 
 
 async def validate(args):
     import mlx.core as mx
     from mlx_lm import load
     from mlx_lm.models.cache import make_prompt_cache
-    from coreai.authoring import AIModelAsset
-    from coreai.runtime import NDArray, SpecializationOptions, ComputeUnitKind
+    from coreai.runtime import SpecializationOptions, ComputeUnitKind
 
     print(f"Loading MLX reference: {args.model}", flush=True)
     model, tokenizer = load(args.model, lazy=False)
     model.eval()
     if args.compute_precision != "auto":
-        _apply_model_compute_precision(model, args.compute_precision)
+        cast_model_precision(model, args.compute_precision)
     cache = make_prompt_cache(model)
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": args.prompt}], tokenize=True, add_generation_prompt=True,
@@ -49,12 +48,11 @@ async def validate(args):
         raise ValueError(f"state-capacity must be at least {required_capacity} for this run")
     options = SpecializationOptions.cpu_only() if args.device == "cpu" else (
         SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu()))
-    asset = AIModelAsset.load(resolve_asset_path(args.asset))
     rows, generated = [], []
-    async with asset.executable(specialization_options=options) as executable:
-        fn = executable.load_function("main")
+    async with CoreAISession(args.asset, specialization_options=options) as session:
+        fn = session.function
         output_name = fn.desc.output_names[0]
-        state = allocate_state(fn, NDArray, state_capacity=capacity)
+        session.reset_state(state_capacity=capacity)
         position = 0
         token = 0
         for index in range(len(batches) + args.steps):
@@ -62,8 +60,7 @@ async def validate(args):
             expected = np.asarray(model(mx.array(ids[None]), cache=cache).astype(mx.float32))
             if not np.isfinite(expected).all():
                 raise AssertionError("MLX reference produced nonfinite logits")
-            actual = await run_main(fn, NDArray, ids, np.arange(position, position + len(ids), dtype=np.int32),
-                                    state, input_name="input_ids", position_ids_name="position_ids")
+            actual = await session.run_tokens(ids, np.arange(position, position + len(ids), dtype=np.int32))
             logits = np.asarray(actual[output_name].numpy(), dtype=np.float32)
             if logits.shape != expected.shape or not np.isfinite(logits).all():
                 raise AssertionError(f"Invalid CoreAI logits: shape={logits.shape}, expected={expected.shape}")

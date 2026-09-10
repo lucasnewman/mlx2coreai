@@ -10,14 +10,17 @@ from .conversion import (
     PreparedMLXGraph,
     capture_mlx_graph,
     convert_mlx_to_coreai,
+    convert_prepared_mlx_to_coreai,
     lower_graph_to_coreai,
     prepare_mlx_conversion,
 )
-from .ir import Graph, Node, StateSpec, TensorSpec
+from .ir import Graph, Node, StateSpec, TensorSpec, TensorType
+from .signature import CaptureSignature, StateBinding
 from .runtime import (
     CoreAIOutputComparison,
     CoreAIRuntimeOutputs,
     CoreAIRuntimeUnavailableError,
+    CoreAISession,
     CoreAIValidationResult,
     compare_coreai_outputs,
     coreai_runtime_available,
@@ -43,11 +46,13 @@ _LAZY_EXPORTS = {
 
 __all__ = [
     "CapturedMLXGraph",
+    "CaptureSignature",
     "ConversionConfig",
     "ConvertedCoreAIModel",
     "CoreAIOutputComparison",
     "CoreAIRuntimeOutputs",
     "CoreAIRuntimeUnavailableError",
+    "CoreAISession",
     "CoreAIValidationResult",
     "Graph",
     "MLXLMConversionInputs",
@@ -55,13 +60,16 @@ __all__ = [
     "Node",
     "PreparedMLXGraph",
     "StateSpec",
+    "StateBinding",
     "TensorSpec",
+    "TensorType",
     "build_mlx_lm_inputs",
     "capture_mlx_graph",
     "compare_coreai_outputs",
     "convert_mlx_lm",
     "convert_mlx_lm_stateful",
     "convert_mlx_to_coreai",
+    "convert_prepared_mlx_to_coreai",
     "coreai_runtime_available",
     "lower_graph_to_coreai",
     "prepare_mlx_conversion",

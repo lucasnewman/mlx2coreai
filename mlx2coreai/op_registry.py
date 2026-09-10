@@ -5,173 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from .ir import Graph
+from .op_rules import OPERATIONS, OpRule
 
 # Canonical MLX -> CoreAI lowering-key mapping for this translator.
-SUPPORTED_MLX_TO_COREAI_OPS: dict[str, str] = {
-    "matmul": "matmul",
-    "add": "add",
-    "maximum": "maximum",
-    "minimum": "minimum",
-    # Arithmetic aliases
-    "subtract": "sub",
-    "sub": "sub",
-    "multiply": "mul",
-    "mul": "mul",
-    "divide": "real_div",
-    "real_div": "real_div",
-    "power": "pow",
-    "pow": "pow",
-    "reciprocal": "inverse",
-    "inverse": "inverse",
-    "remainder": "mod",
-    "mod": "mod",
-    # Reductions
-    "reduce": "reduce",
-    "sum": "reduce_sum",
-    "reduce_sum": "reduce_sum",
-    "mean": "reduce_mean",
-    "reduce_mean": "reduce_mean",
-    "min": "reduce_min",
-    "reduce_min": "reduce_min",
-    "max": "reduce_max",
-    "reduce_max": "reduce_max",
-    "prod": "reduce_prod",
-    "reduce_prod": "reduce_prod",
-    "argmax": "reduce_argmax",
-    "reduce_argmax": "reduce_argmax",
-    "argmin": "reduce_argmin",
-    "reduce_argmin": "reduce_argmin",
-    # Shape/index transforms
-    "flatten": "flatten",
-    "unflatten": "unflatten",
-    "reshape": "reshape",
-    "transpose": "transpose",
-    "atleast_1d": "atleast_1d",
-    "atleast_2d": "atleast_2d",
-    "atleast_3d": "atleast_3d",
-    "moveaxis": "moveaxis",
-    "swapaxes": "swapaxes",
-    "slice": "slice_by_index",
-    "slice_by_index": "slice_by_index",
-    "slice_update": "slice_update",
-    "sliceupdate": "slice_update",
-    "dynamic_slice_update": "dynamic_slice_update",
-    "dynamicsliceupdate": "dynamic_slice_update",
-    "take": "gather",
-    "take_along_axis": "gather_along_axis",
-    "gather": "gather",
-    "squeeze": "squeeze",
-    # Tensor creation/helpers
-    "zeros": "zeros",
-    "ones": "ones",
-    "full": "full",
-    "zeros_like": "zeros_like",
-    "ones_like": "ones_like",
-    "full_like": "full_like",
-    "arange": "arange",
-    "linspace": "linspace",
-    "where": "select",
-    "select": "select",
-    "greater": "greater",
-    "greaterequal": "greater_equal",
-    "greater_equal": "greater_equal",
-    "less": "less",
-    "lessequal": "less_equal",
-    "less_equal": "less_equal",
-    "equal": "equal",
-    "not_equal": "not_equal",
-    "notequal": "not_equal",
-    "exp": "exp",
-    "log": "log",
-    "sqrt": "sqrt",
-    "rsqrt": "rsqrt",
-    "abs": "abs",
-    "split": "split",
-    "expanddims": "expand_dims",
-    "expand_dims": "expand_dims",
-    "bitwisebinary": "bitwisebinary",
-    "scaled_dot_product_attention": "scaled_dot_product_attention",
-    "scaleddotproductattention": "scaled_dot_product_attention",
-    "gated_delta_update": "gated_delta_update",
-    "rope": "rope",
-    "softmax": "softmax",
-    "sigmoid": "sigmoid",
-    "silu": "silu",
-    "gelu": "gelu",
-    "tanh": "tanh",
-    "sin": "sin",
-    "cos": "cos",
-    "erf": "erf",
-    "layernorm": "layernorm",
-    "rmsnorm": "rmsnorm",
-    "astype": "cast",
-    "cast": "cast",
-    "number_of_elements": "number_of_elements",
-    "stop_gradient": "identity",
-    # Linear/broadcast/composite helpers
-    "addmm": "addmm",
-    "broadcast": "broadcast_to",
-    "broadcast_to": "broadcast_to",
-    "broadcast_arrays": "broadcast_arrays",
-    "broadcast_axes": "broadcast_axes",
-    "outer": "outer",
-    "inner": "inner",
-    "tensordot": "tensordot",
-    "isclose": "isclose",
-    "allclose": "allclose",
-    "nan_to_num": "nan_to_num",
-    "diag": "diag",
-    "diagonal": "diagonal",
-    "trace": "trace",
-    "tri": "tri",
-    "tril": "tril",
-    "triu": "triu",
-    "all": "all",
-    "any": "any",
-    "array_equal": "array_equal",
-    "isnan": "isnan",
-    "isinf": "isinf",
-    "isfinite": "isfinite",
-    "isneginf": "isneginf",
-    "isposinf": "isposinf",
-    "eye": "eye",
-    "meshgrid": "meshgrid",
-    "kron": "kron",
-    "logaddexp": "logaddexp",
-    "concatenate": "concat",
-    "copy": "identity",
-    "contiguous": "identity",
-    "arccos": "acos",
-    "arcsin": "asin",
-    "arctan": "atan",
-    "arctanh": "atanh",
-    "negative": "negative",
-    "degrees": "degrees",
-    "radians": "radians",
-    "expm1": "expm1",
-    "log1p": "log1p",
-    "log2": "log2",
-    "log10": "log10",
-    "logsumexp": "reduce_log_sum_exp",
-    "floor_divide": "floor_div",
-    "floor_div": "floor_div",
-    "var": "var",
-    "std": "std",
-    "divmod": "divmod",
-    "conv1d": "conv",
-    "conv2d": "conv",
-    "conv3d": "conv",
-    "conv_general": "conv",
-    "conv_transpose1d": "conv_transpose",
-    "conv_transpose2d": "conv_transpose",
-    "conv_transpose3d": "conv_transpose",
-    "convolution": "conv",
-    "const": "const",
-    "constant": "const",
-    # Stateful lowering primitives
-    "read_state": "read_state",
-    "write_state": "write_state",
-    "state_update_masked": "state_update_masked",
+SUPPORTED_MLX_TO_COREAI_OPS = {
+    alias: rule.key for rule in OPERATIONS.values() for alias in rule.aliases
 }
 
 # Backward-compatible alias for the shared normalization code ported from
@@ -418,14 +256,12 @@ def normalize_mlx_op_name(name: str) -> str:
     return cleaned.lower()
 
 
-def mil_op_for_mlx(name: str) -> str | None:
-    normalized = normalize_mlx_op_name(name)
-    return SUPPORTED_MLX_TO_COREAI_OPS.get(normalized)
-
-
 def coreai_op_for_mlx(name: str) -> str | None:
     normalized = normalize_mlx_op_name(name)
     return SUPPORTED_MLX_TO_COREAI_OPS.get(normalized)
+
+
+mil_op_for_mlx = coreai_op_for_mlx
 
 
 def _source_primitive_context(source: str) -> tuple[str, str | None, str | None]:
@@ -544,3 +380,16 @@ def ensure_supported(graph: Graph) -> None:
             all_ops=[detail["op"] for detail in details],
             details=details,
         )
+
+
+
+def rule_for_mlx(name: str) -> OpRule | None:
+    key = coreai_op_for_mlx(name)
+    return OPERATIONS.get(key)
+
+
+def decode_primitive_arguments(op, arguments, output_shape, output_dtype=None):
+    rule = rule_for_mlx(op)
+    if rule is None or rule.decode is None:
+        return {}
+    return rule.decode(op, arguments, output_shape, output_dtype)

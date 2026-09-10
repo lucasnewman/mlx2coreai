@@ -71,8 +71,8 @@ def test_lfm2_requires_attention_layer():
 @pytest.mark.parametrize("two_attention_layers", [False, True])
 def test_lfm2_dynamic_prefill_decode(tmp_path, precision, two_attention_layers, request):
     import mlx.core as mx
-    from coreai.runtime import NDArray, SpecializationOptions, ComputeUnitKind
-    from scripts.benchmark_aimodel_sampling import allocate_state, run_main
+    from coreai.runtime import SpecializationOptions, ComputeUnitKind
+    from mlx2coreai.runtime import CoreAISession
 
     if not SpecializationOptions.is_supported():
         pytest.skip("requires macOS 27 OS runtime")
@@ -107,17 +107,16 @@ def test_lfm2_dynamic_prefill_decode(tmp_path, precision, two_attention_layers, 
 
     async def check():
         options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-        async with converted.asset.executable(specialization_options=options) as executable:
-            fn = executable.load_function("main")
+        async with CoreAISession(converted.asset, specialization_options=options) as session:
+            fn = session.function
             for capacity, chunks in [(12, [1, 2, 4, 1, 1]), (24, [5, 1, 3, 1]), (64, [21, 1, 5])]:
-                state = allocate_state(fn, NDArray, state_capacity=capacity)
+                state = session.reset_state(state_capacity=capacity)
                 cache = model.make_cache()
                 offset = 0
                 for count in chunks:
                     ids = np.arange(offset + 1, offset + count + 1, dtype=np.int32)
                     expected = np.asarray(model(mx.array(ids[None]), cache=cache).astype(mx.float32))
-                    actual = await run_main(fn, NDArray, ids, np.arange(offset, offset + count, dtype=np.int32),
-                        state, input_name="input_ids", position_ids_name="position_ids")
+                    actual = await session.run_tokens(ids, np.arange(offset, offset + count, dtype=np.int32))
                     logits = actual[fn.desc.output_names[0]].numpy().astype(np.float32)
                     conv_indices = (0, 2, 4) if two_attention_layers else (0, 2)
                     expected_conv = np.stack([np.asarray(cache[i][0].astype(mx.float32)) for i in conv_indices])

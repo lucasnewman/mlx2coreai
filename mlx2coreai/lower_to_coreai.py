@@ -30,30 +30,16 @@ from coreai._compiler.ir import (
 from coreai.authoring import AIProgram, Context
 from coreai._compiler.types import TensorSpec as CoreAITensorSpec
 
+from .dtypes import (
+    constant_array as _array_to_coreai,
+    execution_numpy_dtype as _np_dtype_for_ir,
+    normalize_dtype as _normalize_dtype,
+)
 from ._composite_declaration import generate_composite_decl
 from .ir import Graph, Node, StateSpec, TensorSpec, is_dynamic_dim_ref
-from .op_registry import coreai_op_for_mlx, ensure_supported
-from .passes import infer_broadcast_axes_shape, infer_graph_specs, normalize_graph
-
-
-_DTYPE_ALIASES = {
-    "half": "fp16",
-    "float16": "fp16",
-    "fp16": "fp16",
-    "bfloat16": "bf16",
-    "bf16": "bf16",
-    "float": "fp32",
-    "float32": "fp32",
-    "fp32": "fp32",
-    "double": "fp64",
-    "float64": "fp64",
-    "fp64": "fp64",
-    "int": "int32",
-    "int32": "int32",
-    "long": "int64",
-    "int64": "int64",
-    "bool": "bool",
-}
+from .op_registry import coreai_op_for_mlx, rule_for_mlx
+from .op_rules import less_equal
+from .passes import AnalyzedGraph, analyze_graph, infer_broadcast_axes_shape
 
 
 @dataclass(slots=True)
@@ -101,7 +87,7 @@ class CoreAILoweringConfig:
 @dataclass(frozen=True, slots=True)
 class CoreAIGraphEntry:
     entrypoint_name: str
-    graph: Graph
+    graph: Graph | AnalyzedGraph
     public_input_names: set[str] | None = None
 
 
@@ -117,10 +103,6 @@ class LoweredCoreAIProgram:
     entrypoint_names: list[str] = field(default_factory=list)
     public_inputs_by_entrypoint: dict[str, list[TensorSpec]] = field(default_factory=dict)
     graphs_by_entrypoint: dict[str, Graph] = field(default_factory=dict)
-
-
-def _normalize_dtype(dtype: str) -> str:
-    return _DTYPE_ALIASES.get(str(dtype).strip().lower(), str(dtype).strip().lower())
 
 
 def _element_type(dtype: str) -> Type:
@@ -149,42 +131,6 @@ def _tensor_type(spec: TensorSpec | StateSpec) -> RankedTensorType:
         for dim in spec.shape
     ]
     return RankedTensorType.get(shape, _element_type(spec.dtype))
-
-
-def _np_dtype_for_ir(dtype: str) -> Any:
-    dtype = _normalize_dtype(dtype)
-    if dtype == "fp16":
-        return np.float16
-    if dtype == "bf16":
-        return ml_dtypes.bfloat16
-    if dtype in {"fp32", "fp64"}:
-        return np.float32
-    if dtype in {"int32", "int64"}:
-        return np.int32
-    if dtype == "bool":
-        return np.bool_
-    raise ValueError(f"Unsupported dtype for constant: {dtype}")
-
-
-def _array_to_coreai(value: Any, dtype_hint: str | None = None) -> tuple[np.ndarray, str | None]:
-    arr = np.asarray(value)
-    downcast: str | None = None
-    if dtype_hint is not None:
-        dtype_hint = _normalize_dtype(dtype_hint)
-
-    if arr.dtype == np.float64 or dtype_hint == "fp64":
-        arr = arr.astype(np.float32)
-        downcast = "fp64->fp32"
-    elif arr.dtype == np.int64 or dtype_hint == "int64":
-        if arr.size and (arr.min() < np.iinfo(np.int32).min or arr.max() > np.iinfo(np.int32).max):
-            raise ValueError("int64 constant cannot be safely downcast to int32.")
-        arr = arr.astype(np.int32)
-        downcast = "int64->int32"
-    elif dtype_hint == "bf16":
-        arr = arr.astype(ml_dtypes.bfloat16)
-    elif dtype_hint is not None:
-        arr = arr.astype(_np_dtype_for_ir(dtype_hint))
-    return np.ascontiguousarray(arr), downcast
 
 
 def _static_shape(value: Value) -> list[int]:
@@ -433,7 +379,7 @@ class CoreAILowerer:
         self.unresolved_extra_inputs: list[str] = []
         self._private_graph_counter = 0
 
-    def lower(self, graph: Graph) -> LoweredCoreAIProgram:
+    def lower(self, graph: Graph | AnalyzedGraph) -> LoweredCoreAIProgram:
         entry = CoreAIGraphEntry(
             entrypoint_name=self.config.entrypoint_name,
             graph=graph,
@@ -458,12 +404,11 @@ class CoreAILowerer:
                 self.module = Module.create()
                 with InsertionPoint(self.module.body):
                     for entry in entries:
-                        graph = normalize_graph(entry.graph)
-                        graph.validate()
-                        ensure_supported(graph)
+                        analysis = entry.graph if isinstance(entry.graph, AnalyzedGraph) else analyze_graph(entry.graph)
+                        graph = analysis.graph
                         self.env = {}
-                        self._gated_delta_results = {}
-                        self.inferred = infer_graph_specs(graph)
+                        self._legacy_gated_delta_results = {}
+                        self.inferred = analysis.specs
                         public_inputs = self._public_inputs(
                             graph,
                             public_input_names=entry.public_input_names,
@@ -481,7 +426,11 @@ class CoreAILowerer:
                         with graph_op.block:
                             self._seed_inputs(graph_op, public_inputs, graph)
                             for node in graph.nodes:
-                                self.env[node.output] = self._lower_node(node)
+                                result = self._lower_node(node)
+                                values = tuple(result) if isinstance(result, (tuple, list)) else (result,)
+                                if len(values) != len(node.outputs):
+                                    raise ValueError(f"{node.op} produced {len(values)} values for {len(node.outputs)} outputs.")
+                                self.env.update(zip(node.outputs, values, strict=True))
                             outputs = OrderedDict(
                                 (self._coreai_output_name(graph, name), self.env[name])
                                 for name in graph.outputs
@@ -688,7 +637,7 @@ class CoreAILowerer:
     @staticmethod
     def _coreai_output_name(graph: Graph, output_name: str) -> str:
         for node in reversed(graph.nodes):
-            if node.output == output_name:
+            if output_name in node.outputs:
                 return str(node.attrs.get("coreai_output_name", output_name))
         return output_name
 
@@ -740,261 +689,269 @@ class CoreAILowerer:
             )
         return out
 
-    def _lower_node(self, node: Node) -> Value:
-        op = coreai_op_for_mlx(node.op)
-        if op is None:
+    def _lower_node(self, node: Node) -> Value | tuple[Value, ...]:
+        rule = rule_for_mlx(node.op)
+        if rule is None:
             raise ValueError(f"Unsupported MLX op: {node.op}")
-        if op == "const":
-            if "value" not in node.attrs:
-                raise ValueError(f"constant node '{node.output}' requires 'value'.")
-            return self._constant(node.output, node.attrs["value"], dtype=node.attrs.get("dtype"), source="constant_node")
-        if op == "identity":
+        return rule.lower(self, node)
+
+    def _emit_const(self, node: Node) -> Value:
+        if "value" not in node.attrs:
+            raise ValueError(f"constant node '{node.output}' requires 'value'.")
+        return self._constant(node.output, node.attrs["value"], dtype=node.attrs.get("dtype"), source="constant_node")
+
+    def _emit_identity(self, node: Node) -> Value:
+        return self.env[node.inputs[0]]
+
+    def _emit_read_state(self, node: Node) -> Value:
+        return self.env[node.inputs[0]]
+
+    def _emit_write_state(self, node: Node) -> Value:
+        state, value = [self.env[name] for name in node.inputs[:2]]
+        if state.type == value.type:
+            return value
+        if (state.type.element_type != value.type.element_type or _rank(state) != _rank(value)
+                or any(int(a) >= 0 and int(b) >= 0 and a != b
+                       for a, b in zip(state.type.shape, value.type.shape, strict=True))):
+            raise ValueError(f"State update type {value.type} does not match {state.type}.")
+        return _reshape_like(value, state)
+
+    def _emit_state_update_masked(self, node: Node) -> Value:
+        state = self.env[node.inputs[0]]
+        value = self.env[node.inputs[1]]
+        if len(node.inputs) < 3:
+            return value
+        mask = self.env[node.inputs[2]]
+        return coreai.broadcasting_where(mask, value, state)
+
+    def _emit_binary(self, node: Node, *, fn: Callable) -> Value:
+        x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
+        x, y = _align_binary_operands(x, y)
+        return fn(x, y)
+
+    def _emit_inverse(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        eps = float(node.attrs.get("epsilon", 0.0))
+        denom = coreai.broadcasting_add(x, eps) if eps else x
+        return coreai.broadcasting_divide(coreai.constant(1.0, dtype=x.type.element_type), denom)
+
+    def _emit_matmul(self, node: Node) -> Value:
+        return coreai.broadcasting_batch_matmul(self.env[node.inputs[0]], self.env[node.inputs[1]])
+
+    def _emit_pad(self, node: Node) -> Value:
+        x, value = [self.env[name] for name in node.inputs]
+        if _rank(value) != 0:
+            if math.prod(value.type.shape) != 1:
+                raise ValueError("Padding value must contain exactly one element.")
+            value = self._reshape(value, [])
+        padding = node.attrs["padding"]
+        if any(int(n) < 0 for n in padding):
+            raise ValueError("Negative padding is not supported.")
+        return coreai.pad(x, np.asarray(padding, dtype=np.uint32), value, "constant")
+
+    def _emit_addmm(self, node: Node) -> Value:
+        values = [self.env[name] for name in node.inputs[:3]]
+        if node.attrs.get("input_order", "cab") == "abc":
+            x, y, bias = values
+        else:
+            bias, x, y = values
+        product = coreai.broadcasting_batch_matmul(x, y)
+        alpha, beta = float(node.attrs.get("alpha", 1.0)), float(node.attrs.get("beta", 1.0))
+        if alpha != 1.0:
+            product = coreai.broadcasting_mul(product, coreai.constant(alpha, dtype=product.type.element_type))
+        if beta != 1.0:
+            bias = coreai.broadcasting_mul(bias, coreai.constant(beta, dtype=bias.type.element_type))
+        return coreai.broadcasting_add(bias, product)
+
+    def _emit_softmax(self, node: Node) -> Value:
+        axis = int(node.attrs.get("axis", -1))
+        if axis < 0:
+            axis += _rank(self.env[node.inputs[0]])
+        return coreai.softmax(self.env[node.inputs[0]], axis)
+
+    def _emit_unary(self, node: Node, *, fn: Callable) -> Value:
+        return fn(self.env[node.inputs[0]])
+
+    def _emit_negative(self, node: Node) -> Value:
+        return coreai.broadcasting_mul(self.env[node.inputs[0]], -1.0)
+
+    def _emit_floor_div(self, node: Node) -> Value:
+        return coreai.broadcasting_floor_divide(self.env[node.inputs[0]], self.env[node.inputs[1]])
+
+    def _emit_bool_reduction(self, node: Node, *, op: str) -> Value:
+        return self._lower_bool_reduce(node, any_mode=(op == "any"))
+
+    def _emit_reduction(self, node: Node, *, fn: Callable) -> Value:
+        return self._lower_reduce(node, fn)
+
+    def _emit_arg_reduction(self, node: Node, *, op: str) -> Value:
+        return self._lower_arg_reduce(node, is_min=(op == "reduce_argmin"))
+
+    def _emit_argreduce(self, node: Node) -> Value:
+        return self._lower_arg_reduce(node, is_min=node.attrs["mode"] == 0)
+
+    def _emit_reshape(self, node: Node) -> Value:
+        shape = node.attrs.get("shape")
+        if shape is None:
+            shape = self.inferred.get(node.output).shape
+        return self._reshape(self.env[node.inputs[0]], shape)
+
+    def _emit_transpose(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        perm = node.attrs.get("perm")
+        if perm is None:
+            perm = list(reversed(range(_rank(x))))
+        return coreai.transpose(x, np.asarray([int(v) for v in perm], dtype=np.uint32))
+
+    def _emit_squeeze(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        axes = node.attrs.get("axes")
+        if axes is None:
+            shape = list(x.type.shape)
+            axes = [idx for idx, dim in enumerate(shape) if int(dim) == 1]
+        return coreai.shrink_dims(x, _axes(axes, rank=_rank(x)))
+
+    def _emit_slice_by_index(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        rank = _rank(x)
+        begin = self._index_operand(node.attrs.get("begin"), rank, 0)
+        end = self._index_operand(node.attrs.get("end"), rank, None, x=x)
+        stride = self._index_operand(node.attrs.get("stride"), rank, 1)
+        result = coreai.slice_(x, begin, end, stride)
+        spec = self.inferred.get(node.output)
+        if spec is not None and spec.shape is not None and len(spec.shape) == _rank(result):
+            if any(dim >= 0 and int(actual) < 0 for dim, actual in zip(spec.shape, result.type.shape, strict=True)):
+                # Runtime slice bounds can erase even unchanged channel/head
+                # dimensions from CoreAI's type. Retain captured static axes.
+                result = _reshape_with_mixed_shape(result, [
+                    dim if dim >= 0 else _dim_1d_from_value(result, axis)
+                    for axis, dim in enumerate(spec.shape)])
+        return result
+
+    def _emit_concat(self, node: Node) -> Value:
+        axis = int(node.attrs.get("axis", 0))
+        return coreai.concat(axis, [self.env[name] for name in node.inputs])
+
+    def _emit_broadcast_to(self, node: Node) -> Value:
+        shape = node.attrs.get("shape")
+        if shape is None:
+            shape = self.inferred.get(node.output).shape
+        return _broadcast_to_with_shape(
+            self.env[node.inputs[0]],
+            self._shape_operand(shape),
+            shape,
+        )
+
+    def _emit_gather_along_axis(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        indices = self.env[node.inputs[1]]
+        axis = _normalize_axis(int(node.attrs.get("axis", 0)), _rank(x))
+        return coreai.gather_along_axis(x, indices, np.asarray(axis, dtype=np.int32))
+
+    def _emit_select(self, node: Node) -> Value:
+        return coreai.broadcasting_where(
+            self.env[node.inputs[0]], self.env[node.inputs[1]], self.env[node.inputs[2]]
+        )
+
+    def _emit_cast(self, node: Node) -> Value:
+        dtype = _normalize_dtype(str(node.attrs.get("dtype", "fp32")))
+        return coreai.cast(self.env[node.inputs[0]], _element_type(dtype))
+
+    def _emit_number_of_elements(self, node: Node) -> Value:
+        shape = coreai.cast(coreai.get_shape(self.env[node.inputs[0]]), IntegerType.get_signed(32))
+        return coreai.reduce_product(shape, [0])
+
+    def _emit_fill(self, node: Node, *, op: str) -> Value:
+        if op == "full" and len(node.inputs) == 1 and "shape" not in node.attrs and "value" not in node.attrs:
             return self.env[node.inputs[0]]
-        if op == "read_state":
-            return self.env[node.inputs[0]]
-        if op == "write_state":
-            state, value = [self.env[name] for name in node.inputs[:2]]
-            if state.type == value.type:
-                return value
-            if (state.type.element_type != value.type.element_type or _rank(state) != _rank(value)
-                    or any(int(a) >= 0 and int(b) >= 0 and a != b
-                           for a, b in zip(state.type.shape, value.type.shape, strict=True))):
-                raise ValueError(f"State update type {value.type} does not match {state.type}.")
-            return _reshape_like(value, state)
-        if op == "state_update_masked":
-            state = self.env[node.inputs[0]]
-            value = self.env[node.inputs[1]]
-            if len(node.inputs) < 3:
-                return value
-            mask = self.env[node.inputs[2]]
-            return coreai.broadcasting_where(mask, value, state)
+        return self._lower_fill(node, op)
 
-        if op in _BINARY_OPS:
-            x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
-            x, y = _align_binary_operands(x, y)
-            return _BINARY_OPS[op](x, y)
-        if op == "bitwisebinary":
-            return self._lower_bitwise_binary(node)
-        if op == "inverse":
-            x = self.env[node.inputs[0]]
-            eps = float(node.attrs.get("epsilon", 0.0))
-            denom = coreai.broadcasting_add(x, eps) if eps else x
-            return coreai.broadcasting_divide(coreai.constant(1.0, dtype=x.type.element_type), denom)
-        if op == "matmul":
-            return coreai.broadcasting_batch_matmul(self.env[node.inputs[0]], self.env[node.inputs[1]])
-        if op == "addmm":
-            bias, x, y = [self.env[name] for name in node.inputs[:3]]
-            return coreai.broadcasting_add(bias, coreai.broadcasting_batch_matmul(x, y))
+    def _emit_zeros_like(self, node: Node, *, op: str) -> Value:
+        x = self.env[node.inputs[0]]
+        value = 0.0 if op == "zeros_like" else 1.0
+        if op == "full_like":
+            value = float(node.attrs.get("value", 0.0))
+        return coreai.broadcasting_add(coreai.broadcasting_mul(x, 0.0), value)
 
-        if op == "softmax":
-            axis = int(node.attrs.get("axis", -1))
-            if axis < 0:
-                axis += _rank(self.env[node.inputs[0]])
-            return coreai.softmax(self.env[node.inputs[0]], axis)
-        if op in _UNARY_OPS:
-            return _UNARY_OPS[op](self.env[node.inputs[0]])
-        if op == "negative":
-            return coreai.broadcasting_mul(self.env[node.inputs[0]], -1.0)
-        if op == "floor_div":
-            return coreai.broadcasting_floor_divide(self.env[node.inputs[0]], self.env[node.inputs[1]])
+    def _emit_arange(self, node: Node) -> Value:
+        start = node.attrs.get("start", 0)
+        stop = node.attrs.get("stop", node.attrs.get("end", 0))
+        step = node.attrs.get("step", 1)
+        if is_dynamic_dim_ref(start) or is_dynamic_dim_ref(stop) or is_dynamic_dim_ref(step):
+            dyn = RankedTensorType.get_dynamic_size()
+            return coreai.RangeOp(
+                self._scalar_operand(start),
+                self._scalar_operand(stop),
+                self._scalar_operand(step),
+                results=[RankedTensorType.get([dyn], IntegerType.get_signed(32))],
+            ).result
+        return coreai.range_(
+            coreai.constant(int(start), dtype=np.int32),
+            coreai.constant(int(stop), dtype=np.int32),
+            coreai.constant(int(step), dtype=np.int32),
+        )
 
-        if op == "reduce":
-            return self._lower_generic_reduce(node)
-        if op in {"all", "any"}:
-            return self._lower_bool_reduce(node, any_mode=(op == "any"))
-        if op in _REDUCE_OPS:
-            return self._lower_reduce(node, _REDUCE_OPS[op])
-        if op in {"reduce_argmax", "reduce_argmin"}:
-            return self._lower_arg_reduce(node, is_min=(op == "reduce_argmin"))
+    def _emit_gated_delta_update(self, node: Node) -> Value | tuple[Value, ...]:
+        from ._gated_delta import lower_gated_delta_update
 
-        if op in {"reshape", "flatten", "unflatten"}:
-            shape = node.attrs.get("shape")
-            if shape is None:
-                shape = self.inferred.get(node.output).shape
-            return self._reshape(self.env[node.inputs[0]], shape)
-        if op == "moveaxis":
-            return self._lower_moveaxis(node)
-        if op == "swapaxes":
-            return self._lower_swapaxes(node)
-        if op == "transpose":
-            x = self.env[node.inputs[0]]
-            perm = node.attrs.get("perm")
-            if perm is None:
-                perm = list(reversed(range(_rank(x))))
-            return coreai.transpose(x, np.asarray([int(v) for v in perm], dtype=np.uint32))
-        if op in {"expand_dims", "atleast_1d", "atleast_2d", "atleast_3d"}:
-            return self._lower_expand(node, op)
-        if op == "squeeze":
-            x = self.env[node.inputs[0]]
-            axes = node.attrs.get("axes")
-            if axes is None:
-                shape = list(x.type.shape)
-                axes = [idx for idx, dim in enumerate(shape) if int(dim) == 1]
-            return coreai.shrink_dims(x, _axes(axes, rank=_rank(x)))
-        if op == "slice_by_index":
-            x = self.env[node.inputs[0]]
-            rank = _rank(x)
-            begin = self._index_operand(node.attrs.get("begin"), rank, 0)
-            end = self._index_operand(node.attrs.get("end"), rank, None, x=x)
-            stride = self._index_operand(node.attrs.get("stride"), rank, 1)
-            return coreai.slice_(x, begin, end, stride)
-        if op == "slice_update":
-            return self._lower_slice_update(node)
-        if op == "dynamic_slice_update":
-            return self._lower_dynamic_slice_update(node)
-        if op == "concat":
-            axis = int(node.attrs.get("axis", 0))
-            return coreai.concat(axis, [self.env[name] for name in node.inputs])
-        if op == "split":
-            return self._lower_split(node)
-        if op == "broadcast_to":
-            shape = node.attrs.get("shape")
-            if shape is None:
-                shape = self.inferred.get(node.output).shape
-            return _broadcast_to_with_shape(
-                self.env[node.inputs[0]],
-                self._shape_operand(shape),
-                shape,
+        key = tuple(node.inputs)
+        legacy = len(node.outputs) == 1
+        results = self._legacy_gated_delta_results.get(key) if legacy else None
+        if results is None:
+            self._private_graph_counter += 1
+            results = lower_gated_delta_update(
+                [self.env[name] for name in node.inputs],
+                module=self.module, graph=self.current_graph,
+                name=f"__mlx2coreai_gated_delta_update_{self._private_graph_counter}",
+                implementation=self.config.gated_delta_implementation,
             )
-        if op == "broadcast_arrays":
-            return self._lower_broadcast_arrays(node)
-        if op == "broadcast_axes":
-            return self._lower_broadcast_axes(node)
+            if legacy:
+                self._legacy_gated_delta_results[key] = results
+        return results[int(node.attrs.get("output_index", 0))] if legacy else tuple(results)
 
-        if op == "gather":
-            return self._lower_gather(node)
-        if op == "gather_along_axis":
-            x = self.env[node.inputs[0]]
-            indices = self.env[node.inputs[1]]
-            axis = _normalize_axis(int(node.attrs.get("axis", 0)), _rank(x))
-            return coreai.gather_along_axis(x, indices, np.asarray(axis, dtype=np.int32))
-        if op == "select":
-            return coreai.broadcasting_where(
-                self.env[node.inputs[0]], self.env[node.inputs[1]], self.env[node.inputs[2]]
-            )
-        if op == "cast":
-            dtype = _normalize_dtype(str(node.attrs.get("dtype", "fp32")))
-            return coreai.cast(self.env[node.inputs[0]], _element_type(dtype))
-        if op == "number_of_elements":
-            shape = coreai.cast(coreai.get_shape(self.env[node.inputs[0]]), IntegerType.get_signed(32))
-            return coreai.reduce_product(shape, [0])
+    def _emit_outer(self, node: Node) -> Value:
+        x = coreai.expand_dims(self.env[node.inputs[0]], [_rank(self.env[node.inputs[0]])])
+        y = coreai.expand_dims(self.env[node.inputs[1]], [0])
+        return coreai.broadcasting_mul(x, y)
 
-        if op in {"zeros", "ones", "full"}:
-            if op == "full" and len(node.inputs) == 1 and "shape" not in node.attrs and "value" not in node.attrs:
-                return self.env[node.inputs[0]]
-            return self._lower_fill(node, op)
-        if op in {"zeros_like", "ones_like", "full_like"}:
-            x = self.env[node.inputs[0]]
-            value = 0.0 if op == "zeros_like" else 1.0
-            if op == "full_like":
-                value = float(node.attrs.get("value", 0.0))
-            return coreai.broadcasting_add(coreai.broadcasting_mul(x, 0.0), value)
-        if op == "arange":
-            start = node.attrs.get("start", 0)
-            stop = node.attrs.get("stop", node.attrs.get("end", 0))
-            step = node.attrs.get("step", 1)
-            if is_dynamic_dim_ref(start) or is_dynamic_dim_ref(stop) or is_dynamic_dim_ref(step):
-                dyn = RankedTensorType.get_dynamic_size()
-                return coreai.RangeOp(
-                    self._scalar_operand(start),
-                    self._scalar_operand(stop),
-                    self._scalar_operand(step),
-                    results=[RankedTensorType.get([dyn], IntegerType.get_signed(32))],
-                ).result
-            return coreai.range_(
-                coreai.constant(int(start), dtype=np.int32),
-                coreai.constant(int(stop), dtype=np.int32),
-                coreai.constant(int(step), dtype=np.int32),
-            )
-        if op == "linspace":
-            return self._lower_linspace(node)
+    def _emit_inner(self, node: Node) -> Value:
+        x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
+        prod = coreai.broadcasting_mul(x, y)
+        return coreai.reduce_sum(prod, [_rank(prod) - 1])
 
-        if op == "rmsnorm":
-            return self._lower_rmsnorm(node)
-        if op == "layernorm":
-            return self._lower_layernorm(node)
-        if op == "scaled_dot_product_attention":
-            return self._lower_sdpa(node)
-        if op == "gated_delta_update":
-            from ._gated_delta import lower_gated_delta_update
-
-            key = tuple(node.inputs)
-            if key not in self._gated_delta_results:
-                self._private_graph_counter += 1
-                self._gated_delta_results[key] = lower_gated_delta_update(
-                    [self.env[name] for name in node.inputs],
-                    module=self.module, graph=self.current_graph,
-                    name=f"__mlx2coreai_gated_delta_update_{self._private_graph_counter}",
-                    implementation=self.config.gated_delta_implementation,
+    def _emit_logaddexp(self, node: Node) -> Value:
+        x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
+        m = coreai.broadcasting_maximum(x, y)
+        return coreai.broadcasting_add(
+            m,
+            coreai.log(
+                coreai.broadcasting_add(
+                    coreai.exp(coreai.broadcasting_sub(x, m)),
+                    coreai.exp(coreai.broadcasting_sub(y, m)),
                 )
-            return self._gated_delta_results[key][int(node.attrs.get("output_index", 0))]
-        if op == "rope":
-            return self._lower_rope(node)
+            ),
+        )
 
-        if op == "outer":
-            x = coreai.expand_dims(self.env[node.inputs[0]], [_rank(self.env[node.inputs[0]])])
-            y = coreai.expand_dims(self.env[node.inputs[1]], [0])
-            return coreai.broadcasting_mul(x, y)
-        if op == "inner":
-            x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
-            prod = coreai.broadcasting_mul(x, y)
-            return coreai.reduce_sum(prod, [_rank(prod) - 1])
-        if op == "tensordot":
-            return self._lower_tensordot(node)
-        if op == "logaddexp":
-            x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
-            m = coreai.broadcasting_maximum(x, y)
-            return coreai.broadcasting_add(
-                m,
-                coreai.log(
-                    coreai.broadcasting_add(
-                        coreai.exp(coreai.broadcasting_sub(x, m)),
-                        coreai.exp(coreai.broadcasting_sub(y, m)),
-                    )
-                ),
-            )
-        if op in {"var", "std"}:
-            return self._lower_var_std(node, compute_std=(op == "std"))
-        if op == "array_equal":
-            return self._lower_array_equal(node)
-        if op == "isclose":
-            return self._lower_isclose(node)
-        if op == "allclose":
-            close = self._lower_isclose(node)
-            reduced = coreai.all_(close, list(range(_rank(close))))
-            return coreai.shrink_dims(reduced, list(range(_rank(reduced)))) if _rank(reduced) else reduced
-        if op == "nan_to_num":
-            return self._lower_nan_to_num(node)
-        if op == "divmod":
-            x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
-            q = coreai.broadcasting_floor_divide(x, y)
-            r = coreai.broadcasting_modulo(x, y)
-            which = str(node.attrs.get("output", node.attrs.get("which", ""))).strip().lower()
-            output_index = int(node.attrs.get("output_index", 1 if which in {"remainder", "rem", "mod"} else 0))
-            return r if output_index == 1 or which in {"remainder", "rem", "mod"} else q
+    def _emit_variance(self, node: Node, *, op: str) -> Value:
+        return self._lower_var_std(node, compute_std=(op == "std"))
 
-        if op == "diag":
-            return self._lower_diag(node)
-        if op == "diagonal":
-            return self._lower_diagonal(node)
-        if op == "trace":
-            return self._lower_trace(node)
-        if op == "tri":
-            return self._lower_tri(node)
-        if op in {"tril", "triu"}:
-            return self._lower_triangular_band(node, lower=(op == "tril"))
-        if op == "eye":
-            return self._lower_eye(node)
-        if op == "meshgrid":
-            return self._lower_meshgrid(node)
-        if op == "kron":
-            return self._lower_kron(node)
-        if op == "conv":
-            return self._lower_conv(node, transpose=False)
-        if op == "conv_transpose":
-            return self._lower_conv(node, transpose=True)
+    def _emit_allclose(self, node: Node) -> Value:
+        close = self._lower_isclose(node)
+        reduced = coreai.all_(close, list(range(_rank(close))))
+        return coreai.shrink_dims(reduced, list(range(_rank(reduced)))) if _rank(reduced) else reduced
 
-        raise ValueError(f"CoreAI lowering for op '{op}' is not implemented yet.")
+    def _emit_divmod(self, node: Node) -> Value | tuple[Value, ...]:
+        x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
+        q = coreai.broadcasting_floor_divide(x, y)
+        r = coreai.broadcasting_modulo(x, y)
+        if len(node.outputs) > 1:
+            return q, r
+        which = str(node.attrs.get("output", node.attrs.get("which", ""))).strip().lower()
+        output_index = int(node.attrs.get("output_index", 1 if which in {"remainder", "rem", "mod"} else 0))
+        return r if output_index == 1 or which in {"remainder", "rem", "mod"} else q
+
+    def _emit_triangular(self, node: Node, *, op: str) -> Value:
+        return self._lower_triangular_band(node, lower=(op == "tril"))
 
     def _lower_arg_reduce(self, node: Node, *, is_min: bool) -> Value:
         x = self.env[node.inputs[0]]
@@ -1089,10 +1046,9 @@ class CoreAILowerer:
         perm[axis1], perm[axis2] = perm[axis2], perm[axis1]
         return coreai.transpose(x, np.asarray(perm, dtype=np.uint32))
 
-    def _lower_split(self, node: Node) -> Value:
+    def _lower_split(self, node: Node) -> Value | tuple[Value, ...]:
         x = self.env[node.inputs[0]]
         axis = _normalize_axis(int(node.attrs.get("axis", 0)), _rank(x))
-        output_index = int(node.attrs.get("output_index", 0))
         if "split_indices" in node.attrs:
             indices = [int(v) for v in node.attrs["split_indices"]]
             dim = int(x.type.shape[axis])
@@ -1101,20 +1057,29 @@ class CoreAILowerer:
             n = int(node.attrs.get("num_splits", 1))
             dim = int(x.type.shape[axis])
             sizes = [dim // n] * n
-        begin = [0] * _rank(x)
-        begin[axis] = sum(sizes[:output_index])
         if dim < 0:
             raise ValueError("split requires a static split axis; other axes may be dynamic.")
-        end = _value_shape_operand(x, overrides={axis: begin[axis] + sizes[output_index]})
-        result = coreai.slice_(x, begin, end, [1] * _rank(x))
-        shape = [int(d) if int(d) >= 0 else _dim_1d_from_value(x, i) for i, d in enumerate(x.type.shape)]
-        shape[axis] = sizes[output_index]
-        return _reshape_with_mixed_shape(result, shape)
+        indices = range(len(node.outputs)) if len(node.outputs) > 1 else [int(node.attrs.get("output_index", 0))]
+        results = []
+        for index in indices:
+            begin = [0] * _rank(x)
+            begin[axis] = sum(sizes[:index])
+            end = _value_shape_operand(x, overrides={axis: begin[axis] + sizes[index]})
+            result = coreai.slice_(x, begin, end, [1] * _rank(x))
+            shape = [int(d) if int(d) >= 0 else _dim_1d_from_value(x, i) for i, d in enumerate(x.type.shape)]
+            shape[axis] = sizes[index]
+            results.append(_reshape_with_mixed_shape(result, shape))
+        return results[0] if len(node.outputs) == 1 else tuple(results)
 
     def _lower_slice_update(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]
         update = self.env[node.inputs[1]]
         rank = _rank(x)
+        raw_stride = node.attrs.get("stride", [1] * rank)
+        if all(step == 1 for step in raw_stride):
+            return coreai.slice_update(x, self._index_operand(node.attrs.get("begin"), rank, 0),
+                                      self._index_operand(node.attrs.get("end"), rank, None, x=x),
+                                      [1] * rank, update)
         begin = _pad_index(node.attrs.get("begin"), rank, 0)
         end = _pad_index(node.attrs.get("end"), rank, None, x=x)
         stride = _pad_index(node.attrs.get("stride"), rank, 1)
@@ -1157,26 +1122,20 @@ class CoreAILowerer:
         end_indices = coreai.broadcasting_add(start_indices, update_shape)
         return coreai.slice_update(x, start_indices, end_indices, [1] * rank, update)
 
-    def _lower_broadcast_arrays(self, node: Node) -> Value:
+    def _lower_broadcast_arrays(self, node: Node) -> Value | tuple[Value, ...]:
         spec = self.inferred.get(node.output)
         if spec is None or spec.shape is None:
             raise ValueError(f"broadcast_arrays node '{node.output}' requires inferred shape.")
-        output_index = int(node.attrs.get("output_index", 0))
         if any(int(dim) < 0 for dim in spec.shape):
             shapes = [coreai.get_shape(self.env[name]) for name in node.inputs]
             target_shape = shapes[0]
             for shape in shapes[1:]:
                 target_shape = coreai.broadcast_shapes(target_shape, shape)
-            return _broadcast_to_with_shape(
-                self.env[node.inputs[output_index]],
-                target_shape,
-                spec.shape,
-            )
-        return _broadcast_to_with_shape(
-            self.env[node.inputs[output_index]],
-            _as_shape_value(spec.shape),
-            spec.shape,
-        )
+        else:
+            target_shape = _as_shape_value(spec.shape)
+        indices = range(len(node.outputs)) if len(node.outputs) > 1 else [int(node.attrs.get("output_index", 0))]
+        results = tuple(_broadcast_to_with_shape(self.env[node.inputs[index]], target_shape, spec.shape) for index in indices)
+        return results[0] if len(node.outputs) == 1 else results
 
     def _lower_broadcast_axes(self, node: Node) -> Value:
         # Lowered types retain rank even when upstream graph inference is incomplete.
@@ -1324,7 +1283,7 @@ class CoreAILowerer:
         x = self.env[node.inputs[0]]
         gamma = self.env[node.inputs[1]] if len(node.inputs) > 1 else coreai.constant(1.0, dtype=x.type.element_type)
         beta = self.env[node.inputs[2]] if len(node.inputs) > 2 else coreai.constant(0.0, dtype=x.type.element_type)
-        axes = _axes(node.attrs.get("axes"), rank=_rank(x))
+        axes = _axes(node.attrs.get("axes", []), rank=_rank(x))
         if not axes:
             normalized_shape = node.attrs.get("normalized_shape")
             if normalized_shape is not None:
@@ -1519,7 +1478,7 @@ class CoreAILowerer:
         atol = float(node.attrs.get("atol", 1e-8))
         diff = coreai.abs_(coreai.broadcasting_sub(x, y))
         tol = coreai.broadcasting_add(atol, coreai.broadcasting_mul(rtol, coreai.abs_(y)))
-        close = _BINARY_OPS["less_equal"](diff, tol)
+        close = less_equal(diff, tol)
         equal = coreai.broadcasting_equal(x, y)
         close = coreai.broadcasting_or(close, equal)
         if bool(node.attrs.get("equal_nan", False)):
@@ -1621,6 +1580,10 @@ class CoreAILowerer:
         return self._constant(node.output, value, dtype=dtype, source="eye")
 
     def _lower_meshgrid(self, node: Node) -> Value:
+        if len(node.outputs) > 1:
+            return tuple(self._lower_meshgrid(Node(
+                node.op, node.inputs, name, {**node.attrs, "input_index": index}, node.source,
+            )) for index, name in enumerate(node.outputs))
         if bool(node.attrs.get("sparse", False)):
             raise ValueError(f"meshgrid node '{node.output}' does not support sparse=True yet.")
         input_index = int(node.attrs.get("input_index", 0))
@@ -1668,6 +1631,23 @@ class CoreAILowerer:
         if channels_last:
             perm = np.asarray([0, spatial + 1, *range(1, spatial + 1)], dtype=np.uint32)
             x, weight = coreai.transpose(x, perm), coreai.transpose(weight, perm)
+        input_dilations = _as_int_list(node.attrs.get("input_dilations"), spatial, default=1)
+        if any(d != 1 for d in input_dilations):
+            if spatial != 1:
+                raise ValueError("Input-dilated convolution currently supports one spatial axis only.")
+            dilation = input_dilations[0]
+            if dilation < 1:
+                raise ValueError("Input dilation must be positive.")
+            # Insert zeros between input samples, then trim the trailing zeros.
+            expanded = coreai.expand_dims(x, [3])
+            expanded = coreai.pad(expanded, np.asarray([0, 0, 0, 0, 0, 0, 0, dilation - 1], np.uint32),
+                                  coreai.constant(0, dtype=x.type.element_type), "constant")
+            expanded = _reshape_with_mixed_shape(expanded, [_dim_1d_from_value(x, 0), int(x.type.shape[1]), -1])
+            end = _mixed_shape_operand([_dim_1d_from_value(x, 0), int(x.type.shape[1]),
+                                        _bsub(_bmul(_dim_1d_from_value(x, 2), dilation), dilation - 1)])
+            x = coreai.slice_(expanded, np.zeros(3, np.int32), end, np.ones(3, np.int32))
+        if node.attrs.get("flip", False):
+            weight = coreai.reverse(weight, np.asarray(list(range(2, spatial + 2)), np.int32))
         strides = _as_int_list(node.attrs.get("strides", node.attrs.get("stride")), spatial, default=1)
         dilations = _as_int_list(node.attrs.get("dilations", node.attrs.get("dilation")), spatial, default=1)
         groups = int(node.attrs.get("groups", 1))
@@ -2031,10 +2011,10 @@ def _rope_body(
         pairs = _reshape_with_mixed_shape(x_rot, pairs_shape)
         pair_rank = _rank(pairs)
         even_end = _value_shape_operand(pairs, overrides={pair_rank - 1: 1})
-        even = coreai.shrink_dims(coreai.slice_(pairs, [0] * pair_rank, even_end, [1] * pair_rank), [pair_rank - 1])
+        even = _reshape_with_mixed_shape(coreai.slice_(pairs, [0] * pair_rank, even_end, [1] * pair_rank), half_shape)
         odd_begin = [0] * pair_rank
         odd_begin[-1] = 1
-        odd = coreai.shrink_dims(coreai.slice_(pairs, odd_begin, _value_shape_operand(pairs), [1] * pair_rank), [pair_rank - 1])
+        odd = _reshape_with_mixed_shape(coreai.slice_(pairs, odd_begin, _value_shape_operand(pairs), [1] * pair_rank), half_shape)
         rot_even = _bsub(_bmul(even, cos), _bmul(odd, sin))
         rot_odd = _badd(_bmul(even, sin), _bmul(odd, cos))
         rotated_shape = [
@@ -2057,74 +2037,8 @@ def _rope_body(
     return rotated
 
 
-_BINARY_OPS: dict[str, Callable[[Value, Value], Value]] = {
-    "add": coreai.broadcasting_add,
-    "maximum": coreai.broadcasting_maximum,
-    "minimum": coreai.broadcasting_minimum,
-    "sub": coreai.broadcasting_sub,
-    "mul": coreai.broadcasting_mul,
-    "real_div": coreai.broadcasting_divide,
-    "divide": coreai.broadcasting_divide,
-    "pow": coreai.broadcasting_pow,
-    "mod": coreai.broadcasting_modulo,
-    "greater": coreai.broadcasting_greater,
-    "greater_equal": lambda x, y: coreai.broadcasting_or(
-        coreai.broadcasting_greater(x, y), coreai.broadcasting_equal(x, y)
-    ),
-    "less": lambda x, y: coreai.broadcasting_greater(y, x),
-    "less_equal": lambda x, y: coreai.broadcasting_or(
-        coreai.broadcasting_greater(y, x), coreai.broadcasting_equal(x, y)
-    ),
-    "equal": coreai.broadcasting_equal,
-    "not_equal": coreai.broadcasting_not_equal,
-}
-
-
-_UNARY_OPS: dict[str, Callable[[Value], Value]] = {
-    "sigmoid": coreai.sigmoid,
-    "silu": coreai.silu,
-    "gelu": coreai.gelu,
-    "tanh": coreai.tanh,
-    "sin": coreai.sin,
-    "cos": coreai.cos,
-    "erf": coreai.erf,
-    "acos": coreai.acos,
-    "asin": coreai.asin,
-    "atan": coreai.atan,
-    "atanh": coreai.atanh,
-    "exp": coreai.exp,
-    "expm1": lambda x: coreai.broadcasting_sub(coreai.exp(x), 1.0),
-    "log": coreai.log,
-    "log1p": lambda x: coreai.log(coreai.broadcasting_add(x, 1.0)),
-    "log2": lambda x: coreai.broadcasting_divide(coreai.log(x), math.log(2.0)),
-    "log10": lambda x: coreai.broadcasting_divide(coreai.log(x), math.log(10.0)),
-    "sqrt": coreai.sqrt,
-    "rsqrt": coreai.rsqrt,
-    "abs": coreai.abs_,
-    "degrees": lambda x: coreai.broadcasting_mul(x, 180.0 / math.pi),
-    "radians": lambda x: coreai.broadcasting_mul(x, math.pi / 180.0),
-    "isnan": lambda x: coreai.broadcasting_not_equal(x, x),
-    "isinf": lambda x: coreai.broadcasting_equal(coreai.abs_(x), float("inf")),
-    "isfinite": lambda x: coreai.not_(coreai.broadcasting_equal(coreai.abs_(x), float("inf"))),
-    "isneginf": lambda x: coreai.broadcasting_equal(x, float("-inf")),
-    "isposinf": lambda x: coreai.broadcasting_equal(x, float("inf")),
-}
-
-
-_REDUCE_OPS: dict[str, Callable[[Value, list[int]], Value]] = {
-    "reduce_sum": coreai.reduce_sum,
-    "reduce_mean": coreai.reduce_mean,
-    "reduce_min": coreai.reduce_min,
-    "reduce_max": coreai.reduce_max,
-    "reduce_prod": coreai.reduce_product,
-    "reduce_log_sum_exp": lambda x, axes: coreai.log(coreai.reduce_sum(coreai.exp(x), axes)),
-    "all": coreai.all_,
-    "any": coreai.any_,
-}
-
-
 def build_coreai_program(
-    graph: Graph,
+    graph: Graph | AnalyzedGraph,
     *,
     config: CoreAILoweringConfig | None = None,
 ) -> LoweredCoreAIProgram:

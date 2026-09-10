@@ -31,7 +31,7 @@ def test_layer_cache_preserves_storage_dtype():
 def test_packed_cache_reads_and_untouched_regions(tmp_path):
     import mlx.core as mx
     from coreai.runtime import ComputeUnitKind, NDArray, SpecializationOptions
-    from scripts.benchmark_aimodel_sampling import run_main
+    from mlx2coreai.runtime import run_main
 
     if not SpecializationOptions.is_supported():
         pytest.skip("requires macOS 27 OS runtime")
