@@ -56,17 +56,18 @@ def test_state_allocation_resolves_dynamic_dims_and_preserves_bf16(dynamic_dim):
 @pytest.mark.parametrize("grow", [False, True])
 @pytest.mark.parametrize("os_runtime", [False, True])
 @pytest.mark.parametrize("layout", ["query", "context"])
-@pytest.mark.parametrize("recurrent", [False, True])
-def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, grow, os_runtime, layout, recurrent):
+@pytest.mark.parametrize("history_state", [None, "recurrentState", "convState"])
+def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, grow, os_runtime, layout, history_state):
     import coreai.authoring
     import coreai.runtime
 
     calls = []
     options = []
+    recurrent = history_state is not None
 
     class FakeFunction:
         desc = SimpleNamespace(
-            output_names=["logits"], state_names=["recurrentState" if recurrent else "cache"],
+            output_names=["logits"], state_names=[history_state or "cache"],
             state_descriptor=lambda name: SimpleNamespace(shape=(1, -1, 1), dtype="float32"),
         )
 
@@ -119,7 +120,7 @@ def test_python_benchmark_state_positions_and_artifacts(monkeypatch, tmp_path, g
         assert all(interval[i][1] is state for i in (0, 2, 3, 4))
         assert (interval[1][1] is state) == (not recurrent)
         assert all(np.all(value.data == (4 if recurrent else 5)) for value in state.values())
-        assert state["recurrentState" if recurrent else "cache"].data.shape == (1, context + (4 if grow else 1), 1)
+        assert state[history_state or "cache"].data.shape == (1, context + (4 if grow else 1), 1)
         assert interval[0][0]["input_ids"].data.tolist() == [[1] * context]
         lengths = [context, context + 1, context + 1, context + (2 if grow else 1), context + (3 if grow else 1)]
         for step, ((inputs, _), length) in enumerate(zip(interval, lengths, strict=True)):

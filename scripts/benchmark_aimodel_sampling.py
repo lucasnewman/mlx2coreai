@@ -124,7 +124,7 @@ async def benchmark(args: argparse.Namespace) -> list[StatefulBenchmarkRow]:
     print(f"loading executable from {asset_path}", file=sys.stderr)
     async with asset.executable(specialization_options=options) as model:
         function = model.load_function(args.function_name)
-        recurrent = "recurrentState" in function.desc.state_names
+        recurrent = bool({"recurrentState", "convState"}.intersection(function.desc.state_names))
         if recurrent and not args.grow_context:
             raise ValueError("Recurrent models require --grow-context; repeated positions cannot rewind recurrent state.")
         output_name = args.output_name or first_output_name(function)

@@ -626,6 +626,8 @@ def parse_mlx_export_events_to_graph(
                 output_spec.shape,
                 output_dtype=output_spec.dtype,
             )
+            if op in {"slice", "slice_by_index"} and input_entries_raw:
+                attrs["slice_input_shape"] = list(_tensor_spec_from_event_entry(input_entries_raw[0]).shape)
             if len(parsed_outputs) > 1:
                 attrs["output_index"] = output_index
                 attrs["num_outputs"] = len(parsed_outputs)

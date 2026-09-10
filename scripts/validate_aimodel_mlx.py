@@ -12,6 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.benchmark_aimodel_sampling import allocate_state, resolve_asset_path, run_main
+from mlx2coreai._convert_mlx_lm_stateful import _apply_model_compute_precision
 
 
 async def validate(args):
@@ -24,6 +25,8 @@ async def validate(args):
     print(f"Loading MLX reference: {args.model}", flush=True)
     model, tokenizer = load(args.model, lazy=False)
     model.eval()
+    if args.compute_precision != "auto":
+        _apply_model_compute_precision(model, args.compute_precision)
     cache = make_prompt_cache(model)
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": args.prompt}], tokenize=True, add_generation_prompt=True,
@@ -40,7 +43,10 @@ async def validate(args):
         prompt = prompt[count:]
     if prompt:
         batches.append(prompt)
-    capacity = sum(map(len, batches)) + args.steps + 1
+    required_capacity = sum(map(len, batches)) + args.steps + 1
+    capacity = args.state_capacity or required_capacity
+    if capacity < required_capacity:
+        raise ValueError(f"state-capacity must be at least {required_capacity} for this run")
     options = SpecializationOptions.cpu_only() if args.device == "cpu" else (
         SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu()))
     asset = AIModelAsset.load(resolve_asset_path(args.asset))
@@ -72,10 +78,14 @@ async def validate(args):
             print(json.dumps(row), flush=True)
             if relative_l2 > args.max_relative_l2:
                 raise AssertionError(f"Relative L2 {relative_l2:.6f} exceeds {args.max_relative_l2}")
+            if args.max_abs_error is not None and row["max_abs_error"] > args.max_abs_error:
+                raise AssertionError(f"Absolute error {row['max_abs_error']:.6f} exceeds {args.max_abs_error}")
             if index >= len(batches) - 1:
                 generated.append(token)
             position += len(ids)
     result = {"model": args.model, "asset": str(args.asset), "device": args.device,
+              "compute_precision": args.compute_precision,
+              "state_capacity": capacity,
               "prompt": args.prompt, "results": rows, "generated_text": tokenizer.decode(generated)}
     print(result["generated_text"], flush=True)
     if args.json_output:
@@ -91,11 +101,20 @@ def main():
     parser.add_argument("--prefill-chunks", default="3,5")
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--device", choices=["cpu", "gpu"], default="gpu")
+    parser.add_argument("--compute-precision", choices=["auto", "fp32", "fp16", "bf16"], default="auto",
+                        help="Cast MLX reference weights to match an explicitly selected export precision.")
     parser.add_argument("--max-relative-l2", type=float, default=0.05)
+    parser.add_argument("--max-abs-error", type=float)
+    parser.add_argument("--state-capacity", type=int,
+                        help="Allocate this KV-cache capacity instead of the minimum needed for this run.")
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
     if args.steps < 0 or args.max_relative_l2 <= 0:
         parser.error("steps must be nonnegative and max-relative-l2 must be positive")
+    if args.max_abs_error is not None and args.max_abs_error <= 0:
+        parser.error("max-abs-error must be positive")
+    if args.state_capacity is not None and args.state_capacity <= 0:
+        parser.error("state-capacity must be positive")
     asyncio.run(validate(args))
 
 

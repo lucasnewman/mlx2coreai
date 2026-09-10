@@ -34,6 +34,14 @@ in the hybrid graph. See [Qwen3.5 conversion notes](docs/qwen35_conversion.md)
 for artifacts, validation commands, and reduced repros. No fixed-length
 execution workaround is used.
 
+LFM2.5-2.6B export has **validated FP32 logit and state parity** after correcting
+a packed KV-cache read failure in the beta runtime. It uses
+the existing `mlx-lm` implementation and adds short-convolution cache support,
+without gated-delta ops or fixed-length execution. Reduced-precision execution
+still needs separate validation; FP16 can abort during compilation. Use the Python
+runner with `--grow-context` for its three-state contract. See
+[LFM2.5 conversion notes](docs/lfm25_conversion.md) for artifacts and repros.
+
 ## Benchmark Sampling
 
 ```bash

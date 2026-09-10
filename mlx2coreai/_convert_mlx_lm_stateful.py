@@ -66,10 +66,19 @@ class _CacheLayout:
     linear_layers: tuple[bool, ...] = ()
     conv_shape: tuple[int, int] = (0, 0)
     recurrent_shape: tuple[int, int, int] = (0, 0, 0)
+    short_conv_layers: tuple[bool, ...] = ()
 
     @property
     def num_linear_layers(self) -> int:
         return sum(self.linear_layers)
+
+    @property
+    def num_short_conv_layers(self) -> int:
+        return sum(self.short_conv_layers)
+
+    @property
+    def num_conv_layers(self) -> int:
+        return self.num_linear_layers + self.num_short_conv_layers
 
 
 @dataclass(slots=True)
@@ -83,8 +92,8 @@ class _ExportableRecurrentCache:
 
     lengths = None
 
-    def __init__(self, conv: Any, recurrent: Any):
-        self.state = [conv, recurrent]
+    def __init__(self, conv: Any, recurrent: Any = None):
+        self.state = [conv] if recurrent is None else [conv, recurrent]
 
     def __getitem__(self, index: int) -> Any:
         return self.state[index]
@@ -116,22 +125,15 @@ class _ExportableLayeredKVCache:
     def update_and_fetch(self, keys: Any, values: Any) -> tuple[Any, Any]:
         import mlx.core as mx  # noqa: PLC0415
 
-        offset = mx.reshape(self.offset, (1,))
-        layer = mx.array([self.layer_idx], dtype=mx.int32)
-        start = mx.concatenate(
-            [
-                layer,
-                mx.array([0, 0], dtype=mx.int32),
-                offset,
-                mx.array([0], dtype=mx.int32),
-            ]
-        )
-        expanded_keys = mx.expand_dims(keys, 0)
-        expanded_values = mx.expand_dims(values, 0)
-        self.state.keys = mx.slice_update(self.state.keys, expanded_keys, start, [0, 1, 2, 3, 4])
-        self.state.values = mx.slice_update(self.state.values, expanded_values, start, [0, 1, 2, 3, 4])
-        self.keys = self.state.keys[self.layer_idx]
-        self.values = self.state.values[self.layer_idx]
+        # The beta runtime can read stale data after packed slice updates;
+        # updating a layer view with slice_update also crashes MPSGraph. Gather
+        # the new tokens and select only the written interval, then pack once.
+        positions = mx.arange(self.keys.shape[2], dtype=mx.int32) - self.offset
+        last = mx.max(mx.arange(keys.shape[2], dtype=mx.int32))
+        indices = mx.clip(positions, 0, last)
+        mask = ((positions >= 0) & (positions <= last))[None, None, :, None]
+        self.keys = mx.where(mask, mx.take(keys.astype(self.keys.dtype), indices, axis=2), self.keys)
+        self.values = mx.where(mask, mx.take(values.astype(self.values.dtype), indices, axis=2), self.values)
         return self.keys, self.values
 
     def make_mask(
@@ -182,8 +184,9 @@ def convert_mlx_lm_stateful(
     The generated ``.aimodel`` follows the macOS LLM contract used by
     ``coreai-models``: a single dynamic ``main`` entrypoint with ``input_ids``,
     ``position_ids``, and mutable KV-cache state tensors named ``keyCache``
-    and ``valueCache`` by default. Hybrid gated-delta models also carry
-    ``convState`` and FP32 ``recurrentState`` tensors.
+    and ``valueCache`` by default. Short-convolution models also carry
+    ``convState``; hybrid gated-delta models additionally carry an FP32
+    ``recurrentState`` tensor.
     """
 
     if max_context_length <= 0:
@@ -214,6 +217,13 @@ def convert_mlx_lm_stateful(
             stacklevel=2,
         )
     resolved_compute_precision = _resolve_compute_precision(model, compute_precision)
+    if layout.num_short_conv_layers and resolved_compute_precision != "fp32":
+        warnings.warn(
+            "Reduced-precision short-convolution export is experimental: validate against MLX. "
+            "macOS 27 build 26A428 can abort during FP16 compilation; use FP32 for correctness checks.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     if compute_precision != "auto":
         _apply_model_compute_precision(model, resolved_compute_precision)
     resolved_cache_dtype = _normalize_cache_dtype(cache_dtype or resolved_compute_precision)
@@ -314,6 +324,8 @@ def convert_mlx_lm_stateful(
             "state_count": len(state_specs),
             "num_layers": layout.num_layers,
             "num_linear_layers": layout.num_linear_layers,
+            "num_short_conv_layers": layout.num_short_conv_layers,
+            "num_attention_layers": layout.num_layers - layout.num_conv_layers,
             "gated_delta_implementation": base_config.gated_delta_implementation,
             "num_key_value_heads": layout.num_key_value_heads,
             "head_dim": layout.head_dim,
@@ -586,24 +598,34 @@ def _stateful_main_capture_function(
             values=kwargs[value_cache_name],
         )
         caches = []
-        recurrent_caches = []
+        array_caches = []
+        attention_caches = []
         attention_index = 0
-        for is_linear in layout.linear_layers or (False,) * layout.num_layers:
-            if is_linear:
-                index = len(recurrent_caches)
-                cache = _ExportableRecurrentCache(kwargs["convState"][index], kwargs["recurrentState"][index])
-                recurrent_caches.append(cache)
+        linear_layers = layout.linear_layers or (False,) * layout.num_layers
+        short_conv_layers = layout.short_conv_layers or (False,) * layout.num_layers
+        for is_linear, is_short_conv in zip(linear_layers, short_conv_layers, strict=True):
+            if is_linear or is_short_conv:
+                index = len(array_caches)
+                recurrent = kwargs["recurrentState"][index] if is_linear else None
+                cache = _ExportableRecurrentCache(kwargs["convState"][index], recurrent)
+                array_caches.append(cache)
             else:
                 cache = _ExportableLayeredKVCache(state, layer_idx=attention_index, offset=offset)
+                attention_caches.append(cache)
                 attention_index += 1
             caches.append(cache)
         logits = _select_primary_output(model(input_ids, cache=caches))
         if cast_bf16_logits_to_fp16 and "bfloat16" in str(getattr(logits, "dtype", "")).lower():
             logits = logits.astype(mx.float16)
-        outputs = (logits, state.keys, state.values)
-        if recurrent_caches:
-            outputs += (mx.stack([cache[0] for cache in recurrent_caches]),
-                        mx.stack([cache[1] for cache in recurrent_caches]))
+        outputs = (
+            logits,
+            mx.stack([cache.keys for cache in attention_caches]),
+            mx.stack([cache.values for cache in attention_caches]),
+        )
+        if array_caches:
+            outputs += (mx.stack([cache[0] for cache in array_caches]),)
+            if layout.num_linear_layers:
+                outputs += (mx.stack([cache[1] for cache in array_caches]),)
         return outputs
 
     return capture
@@ -694,7 +716,15 @@ def _infer_cache_layout(model: Any) -> _CacheLayout:
     num_layers = len(layers)
     linear_layers = tuple(bool(getattr(layer, "is_linear", False)) for layer in layers)
     linear = [layer.linear_attn for layer in layers if getattr(layer, "is_linear", False)]
-    if all(linear_layers):
+    short_conv_layers = tuple(
+        getattr(layer, "is_attention_layer", None) is False
+        and hasattr(getattr(layer, "conv", None), "L_cache")
+        for layer in layers
+    )
+    short_convs = [layer.conv for layer, is_conv in zip(layers, short_conv_layers) if is_conv]
+    if linear and short_convs:
+        raise ValueError("Mixing gated-delta and short-convolution layer types is not supported.")
+    if sum(linear_layers) + sum(short_conv_layers) == num_layers:
         raise ValueError("Stateful conversion requires at least one full-attention layer.")
     conv_shape = (0, 0)
     recurrent_shape = (0, 0, 0)
@@ -704,6 +734,11 @@ def _infer_cache_layout(model: Any) -> _CacheLayout:
             raise ValueError("Hybrid conversion requires uniform gated-delta state shapes.")
         dims = shapes.pop()
         conv_shape, recurrent_shape = dims[:2], dims[2:]
+    if short_convs:
+        shapes = {(m.L_cache - 1, m.args.hidden_size) for m in short_convs}
+        if len(shapes) != 1 or any(size <= 0 for shape in shapes for size in shape):
+            raise ValueError("Short-convolution conversion requires uniform, positive cache shapes.")
+        conv_shape = shapes.pop()
     args = getattr(model, "args", None)
     n_kv_heads = getattr(args, "num_key_value_heads", None)
     head_dim = getattr(args, "head_dim", None)
@@ -723,6 +758,7 @@ def _infer_cache_layout(model: Any) -> _CacheLayout:
         linear_layers=linear_layers,
         conv_shape=conv_shape,
         recurrent_shape=recurrent_shape,
+        short_conv_layers=short_conv_layers,
     )
 
 
@@ -755,6 +791,11 @@ def _apply_model_compute_precision(model: Any, compute_precision: str) -> None:
         set_dtype(dtype, predicate=predicate)
     else:
         set_dtype(dtype)
+    # Do not capture lazy parameter casts on the first shape but materialized
+    # weights on the probe shape: the two graphs must have the same structure.
+    parameters = getattr(model, "parameters", None)
+    if callable(parameters):
+        mx.eval(parameters())
 
 
 def _iter_model_values(model: Any):
@@ -811,7 +852,7 @@ def _make_state_specs(
     value_cache_name: str,
 ) -> list[StateSpec]:
     shape = (
-        layout.num_layers - layout.num_linear_layers,
+        layout.num_layers - layout.num_conv_layers,
         int(batch_size),
         layout.num_key_value_heads,
         int(max_context_length),
@@ -821,11 +862,10 @@ def _make_state_specs(
         StateSpec(key_cache_name, shape, cache_dtype),
         StateSpec(value_cache_name, shape, cache_dtype),
     ]
+    if layout.num_conv_layers:
+        specs.append(StateSpec("convState", (layout.num_conv_layers, int(batch_size), *layout.conv_shape), cache_dtype))
     if layout.num_linear_layers:
-        specs.extend([
-            StateSpec("convState", (layout.num_linear_layers, int(batch_size), *layout.conv_shape), cache_dtype),
-            StateSpec("recurrentState", (layout.num_linear_layers, int(batch_size), *layout.recurrent_shape), "fp32"),
-        ])
+        specs.append(StateSpec("recurrentState", (layout.num_linear_layers, int(batch_size), *layout.recurrent_shape), "fp32"))
     return specs
 
 

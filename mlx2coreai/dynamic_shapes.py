@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from .ir import Graph, Node, TensorSpec, dynamic_dim_ref, is_dynamic_dim_ref
+from .op_registry import coreai_op_for_mlx
 
 
 DynamicAxes = Mapping[str, Sequence[int] | Mapping[int, Any] | str]
@@ -98,6 +99,21 @@ def dynamicize_graph_from_probe(
     nodes: list[Node] = []
     for node, probe_node in zip(graph.nodes, probe_graph.nodes, strict=True):
         attrs = _dynamicize_attr_value(node.attrs, probe_node.attrs, candidates)
+        # A slice to the end of an intermediate (e.g. concat(history, tokens))
+        # need not match any input dimension. Preserve that runtime extent.
+        if coreai_op_for_mlx(node.op) == "slice_by_index" and node.inputs:
+            base_shape = node.attrs.get("slice_input_shape")
+            probe_shape = probe_node.attrs.get("slice_input_shape")
+            end, probe_end = node.attrs.get("end"), probe_node.attrs.get("end")
+            if base_shape is not None and probe_shape is not None and isinstance(end, (list, tuple)):
+                updated_end = list(attrs["end"])
+                for axis, (base_dim, probe_dim) in enumerate(zip(base_shape, probe_shape, strict=True)):
+                    if (axis < len(end) and isinstance(probe_end, (list, tuple)) and axis < len(probe_end)
+                            and base_dim >= 0 and probe_dim >= 0 and base_dim != probe_dim
+                            and end[axis] == base_dim and probe_end[axis] == probe_dim):
+                        updated_end[axis] = dynamic_dim_ref(node.inputs[0], axis)
+                attrs["end"] = updated_end
+            attrs.pop("slice_input_shape", None)
         nodes.append(replace(node, attrs=attrs))
     out = Graph(inputs=list(graph.inputs), nodes=nodes, outputs=list(graph.outputs))
     out.validate()

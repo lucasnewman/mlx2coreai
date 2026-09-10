@@ -38,7 +38,7 @@ def test_contiguous_hint_is_omitted_only_during_export(tmp_path):
     assert mx.contiguous is original
 
 
-@pytest.mark.parametrize("kind", ["conv_split", "partial_rope"])
+@pytest.mark.parametrize("kind", ["conv_split", "conv_tail", "partial_rope"])
 def test_dynamic_mlx_model_ops(tmp_path, kind):
     import mlx.core as mx
     from coreai.runtime import SpecializationOptions, ComputeUnitKind
@@ -50,6 +50,12 @@ def test_dynamic_mlx_model_ops(tmp_path, kind):
         weight = mx.array(rng.normal(size=(4, 3, 1)).astype(np.float32))
         def fn(x):
             return mx.split(mx.conv1d(x, weight, padding=1, groups=4), 2, axis=-1)
+        shape, axis = (1, 5, 4), 1
+    elif kind == "conv_tail":
+        history = mx.zeros((1, 2, 4), dtype=mx.float32)
+        mx.eval(history)
+        def fn(x):
+            return mx.concatenate([history, x], axis=1)[:, -2:, :]
         shape, axis = (1, 5, 4), 1
     else:
         def fn(x):
