@@ -2,10 +2,10 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from mlx2coreai import ConversionConfig, build_mlx_lm_inputs
-from mlx2coreai._convert_mlx_lm import load_mlx_lm_model
+from mlx2coreai import ConversionConfig
 from mlx2coreai.dtypes import cast_model_precision, normalize_compute_precision
 from mlx2coreai.recipe import Build
+from .source import build_mlx_lm_inputs, load_mlx_lm_model
 from .stateful import (
     TRACE_QUERY_LENGTH, TRACE_POSITION_OFFSET, _resolve_compute_precision,
     _make_state_specs, _stateful_main_capture_function, _stateful_component,

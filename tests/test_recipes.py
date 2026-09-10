@@ -93,7 +93,7 @@ def test_bundle_paths_and_runtime_imports(tmp_path):
         bundle.resource("../escape")
     result = subprocess.run([sys.executable, "-c", "import sys; import recipes.mimi; import recipes.pocket_tts; "
         "assert not any(k.startswith('mlx_audio') for k in sys.modules); "
-        "assert 'mlx2coreai._convert_mlx_lm_stateful' not in sys.modules"], capture_output=True, text=True)
+        "assert not any(k.startswith('recipes._mlx_lm') for k in sys.modules)"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 

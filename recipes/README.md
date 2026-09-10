@@ -1,97 +1,37 @@
 # Model Recipes
 
-Recipes package model conversion and execution behind two functions:
+A recipe owns the model-specific conversion and execution behavior:
 `build(...)` produces a conversion plan, and `run(session, Request(...))`
-executes a request. Choose the guide for your model:
+executes a request. Start with the guide for your model.
 
-- [Language models](../docs/lm_recipes.md): Qwen3, Qwen3.5, LFM2/2.5, and LFM2 MoE.
-- [Audio models](../docs/audio_recipes.md): Mimi, Pocket TTS, and SmartTurn conversion.
+| Recipe | Default source | Runtime output |
+| --- | --- | --- |
+| [Qwen3](qwen3/README.md) | `mlx-community/Qwen3-0.6B-bf16` | Token IDs |
+| [Qwen3.5](qwen35/README.md) | `Qwen/Qwen3.5-0.8B` | Token IDs; experimental |
+| [LFM2 / LFM2.5](lfm2/README.md) | `LiquidAI/LFM2.5-2.6B-MLX-bf16` | Token IDs; parity unresolved |
+| [Mimi](mimi/README.md) | Local Mimi codec checkpoint | Offline codes or audio arrays |
+| [Pocket TTS](pocket_tts/README.md) | `mlx-community/pocket-tts` | Streaming audio chunks |
 
-Read each guide's compatibility warnings before converting a model. Some
-checkpoints export successfully but do not yet execute correctly.
+Each README covers dependencies, build/run examples, validation, and known
+limitations. LFM2 MoE instructions are in the LFM guide. SmartTurn is
+[script-based](../docs/audio_recipes.md#smartturn), not a recipe.
 
-## Build and Load
+## Shared Conventions
 
-```python
-from mlx2coreai.recipe import Bundle, export
-from recipes import qwen3
+Run shell examples from the repository root. Keep generated bundles in
+`artifacts/`, which is ignored by Git. Recipe bundles use `manifest.json`
+and are executed through their recipe.
 
-bundle = export(qwen3.build(), "artifacts/recipes/qwen3_fp32")
+Build settings describe the checkpoint and conversion policy. Requests carry
+runtime inputs, sampling settings, and generation budgets. Opening a bundle
+does not reload the source checkpoint.
 
-# Load an existing bundle without loading the source checkpoint.
-bundle = Bundle.open("artifacts/recipes/qwen3_fp32")
-```
+Use sessions as async context managers. Stateful recipes reset buffers for
+each request and preserve them across generation steps; requests in one
+session must be serial.
 
-Keep generated bundles in the git-ignored `artifacts/` directory. Bundle
-metadata records the source and conversion options. Runtime options, such as
-text, sampling settings, and generation budget, belong to a request.
+## More Detail
 
-## Manage a Session
-
-```python
-from coreai.runtime import ComputeUnitKind, SpecializationOptions
-
-options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-
-async def generate(bundle):
-    async with bundle.session(specialization_options=options, storage_kind="metal") as session:
-        request = qwen3.Request(prompt="Hello!", chat=True, max_new_tokens=32)
-        async for token_id in qwen3.run(session, request):
-            print(token_id)
-```
-
-Use the session as an async context manager so resources are released after
-completion, cancellation, or exceptions. Stateful recipes reset buffers at
-the start of each request. Requests in one session must be serial; independent
-concurrent requests need independent sessions.
-
-Mimi returns a NumPy array per request, language-model recipes yield token IDs,
-and Pocket TTS yields NumPy audio chunks. Language models and Pocket TTS accept
-an optional `report={}` argument to collect generation statistics when the
-request completes.
-
-Inspect `bundle.metadata.get("experimental")` before opening a session. Only
-opt into experimental execution for diagnostics; opening the executable itself
-can fail on an incompatible runtime.
-
-## Create a Recipe
-
-Use the public `Build`, `Component`, and `ConversionConfig` APIs to wrap a model:
-
-```python
-import mlx.core as mx
-import numpy as np
-from mlx2coreai import ConversionConfig
-from mlx2coreai.recipe import Build, Component, export
-
-def build():
-    return Build("tanh", {"main": Component(
-        forward=lambda x: mx.tanh(x),
-        inputs={"x": np.zeros((1, 8), np.float32)},
-        outputs=("result",),
-        config=ConversionConfig(),
-    )})
-
-async def run(session, value):
-    result = await session.run("main", {"x": value}, readback=True)
-    return result["result"]
-
-bundle = export(build(), "artifacts/recipes/tanh")
-```
-
-Declare one unique output name per public output. Use `ConversionConfig` for
-dynamic axes and probe inputs; mutable state is declared with `CaptureSignature`
-and `StateBinding`. Keep optimization enabled for mutable-state components.
-
-`Build.resources` maps relative bundle paths to file paths or bytes, for example
-a tokenizer. Resources must not collide with the manifest or generated assets.
-
-`export(plan, path, only=["component"])` rebuilds selected components only when
-the recipe metadata and resources are unchanged. Otherwise perform a full
-rebuild. Use a new output directory to preserve a previous bundle.
-
-For direct component access, `session.run(name, inputs)` returns named CoreAI
-NDArrays. Set `readback=True` for NumPy copies. `reset_state({name: capacity})`
-allocates fresh state buffers, and `snapshot_state(name)` copies state for
-diagnostics. Normal generation should use the recipe's `run` function so
-positions, capacities, and model-specific request handling are applied.
+- [Language-model options](../docs/lm_recipes.md): shared CLI flags, dynamic capacity, Python generation, and parity validation.
+- [Recipe API](../docs/recipe_api.md): build/export/load examples, session lifecycle, and authoring a new recipe.
+- [Project README](../README.md): installation and generic conversion entry points.

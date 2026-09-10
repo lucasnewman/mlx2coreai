@@ -11,7 +11,7 @@ from mlx2coreai.recipe import export
 from recipes import qwen3, qwen35, lfm2
 from recipes._mlx_lm.runtime import Request, run, sample
 from recipes._mlx_lm.validation import Reference
-from tests.test_convert_mlx_lm import FakeTokenizer
+from tests.test_mlx_lm_source import FakeTokenizer
 from tests.test_lfm2_stateful import tiny_lfm2
 
 

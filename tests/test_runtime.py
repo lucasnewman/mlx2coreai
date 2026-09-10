@@ -234,7 +234,8 @@ def test_session_reuses_function_and_isolates_state(monkeypatch, tmp_path):
             snapshot = session.snapshot_state()
             clone = session.clone_state()
             for buffers in (None, clone, None):
-                await session.run_tokens(np.array([7]), np.array([0]), state=buffers)
+                await session.run({"input_ids": np.array([[7]], np.int32),
+                                   "position_ids": np.array([[0]], np.int32)}, state=buffers)
             np.testing.assert_array_equal(snapshot["cache"], [[0] * 4])
             np.testing.assert_array_equal(clone["cache"].numpy(), [[1] * 4])
             np.testing.assert_array_equal(state["cache"].numpy(), [[2] * 4])
@@ -269,3 +270,13 @@ def test_session_closes_executable_if_function_load_fails(monkeypatch, tmp_path)
         asyncio.run(check())
     assert len(closed) == 1
     assert isinstance(closed[0], ValueError)
+
+
+@pytest.mark.parametrize("nested_asset", [False, True])
+def test_runtime_requires_explicit_asset_path(monkeypatch, tmp_path, nested_asset):
+    calls = _install_fake_runtime(monkeypatch)
+    if nested_asset:
+        (tmp_path / "main.aimodel").mkdir()
+    with pytest.raises(ValueError, match="explicit .aimodel asset path"):
+        run_aimodel_sync(tmp_path, {"x": [1.0]})
+    assert "loaded_path" not in calls

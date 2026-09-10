@@ -1,33 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import ml_dtypes
 import numpy as np
 import pytest
 
-from mlx2coreai import convert_mlx_lm_stateful
-from mlx2coreai._convert_mlx_lm_stateful import _CacheLayout, _make_state_specs, _stateful_inputs
-from mlx2coreai._convert_mlx_lm import build_mlx_lm_inputs
-from tests.test_convert_mlx_lm import FakeTokenizer
+from mlx2coreai.recipe import export
+from recipes import qwen35
+from recipes._mlx_lm.stateful import _CacheLayout, _make_state_specs, _stateful_inputs
+from recipes._mlx_lm.source import build_mlx_lm_inputs
+from tests.test_mlx_lm_source import FakeTokenizer
 
 
 @pytest.mark.parametrize("implementation", ["native", "decomposed"])
 def test_cli_forwards_gated_delta_implementation(monkeypatch, tmp_path, implementation):
-    from types import SimpleNamespace
-    from mlx2coreai import cli
+    import sys
+    from recipes._mlx_lm import cli
 
-    configs = []
-    def convert(*args, **kwargs):
+    configs, exports = [], []
+    plan = object()
+
+    def build(*args, **kwargs):
         configs.append(kwargs["config"])
-        return SimpleNamespace(bundle_path=tmp_path, asset_path=tmp_path / "model.aimodel",
-            lowered=SimpleNamespace(entrypoint_names=["main"]), state_specs=[None] * 4,
-            metadata={"mlx_lm_stateful": {"compute_precision": "bf16", "cache_dtype": "bf16"}},
-            max_context_length=256)
-    monkeypatch.setattr(cli, "convert_mlx_lm_stateful", convert)
-    assert cli.main(["convert-mlx-lm-stateful", "model", "--output", str(tmp_path),
-                     "--gated-delta-implementation", implementation]) == 0
+        return plan
+
+    monkeypatch.setattr(qwen35, "build", build)
+    monkeypatch.setattr(cli, "export", lambda value, path: exports.append((value, path)))
+    monkeypatch.setattr(sys, "argv", ["qwen35", "convert", "model", "--output", str(tmp_path),
+                                    "--gated-delta-implementation", implementation])
+    cli.main(qwen35)
     assert configs[0].gated_delta_implementation == implementation
+    assert exports == [(plan, tmp_path)]
 
 
 @pytest.mark.parametrize("implementation", [
@@ -39,7 +44,7 @@ def test_live_gated_delta_net(tmp_path, monkeypatch, implementation):
     from mlx_lm.models.qwen3_5 import GatedDeltaNet, TextModelArgs
     from coreai.runtime import SpecializationOptions, ComputeUnitKind
     from mlx2coreai import ConversionConfig, convert_mlx_to_coreai
-    from mlx2coreai._convert_mlx_lm_stateful import _ExportableRecurrentCache
+    from recipes._mlx_lm.stateful import _ExportableRecurrentCache
     from mlx2coreai.runtime import run_aimodel_sync
 
     if not SpecializationOptions.is_supported():
@@ -96,41 +101,44 @@ def test_hybrid_state_shapes_and_probe_dtypes():
 def test_tiny_qwen35_dynamic_prefill_and_decode(tmp_path):
     import mlx.core as mx
     from mlx_lm.models.qwen3_5 import TextModel, TextModelArgs
-    from coreai.runtime import NDArray, SpecializationOptions, ComputeUnitKind
-    from mlx2coreai.runtime import allocate_state, run_main
+    from coreai.runtime import SpecializationOptions, ComputeUnitKind
 
     if not SpecializationOptions.is_supported():
         pytest.skip("requires macOS 27 OS runtime")
     mx.random.seed(8)
     model = TextModel(TextModelArgs(
-        hidden_size=64, intermediate_size=128, num_hidden_layers=4, num_attention_heads=2,
+        model_type="qwen3_5", hidden_size=64, intermediate_size=128, num_hidden_layers=4, num_attention_heads=2,
         num_key_value_heads=1, head_dim=32, vocab_size=128, full_attention_interval=4,
         linear_num_value_heads=2, linear_num_key_heads=2, linear_key_head_dim=32,
         linear_value_head_dim=32, tie_word_embeddings=True,
     ))
     model.eval()
     mx.eval(model.parameters())
-    converted = convert_mlx_lm_stateful("tiny-hybrid", tmp_path / "hybrid", max_context_length=32,
-                                       load_fn=lambda *args, **kwargs: (model, FakeTokenizer()))
-    assert len(converted.state_specs) == 4
-    assert converted.lowered.optimized
-    assert sum(n.op == "gated_delta_update" for n in converted.main.normalized_graph.nodes) == 6
+    plan = qwen35.build("tiny-hybrid", max_context_length=32,
+                        load_fn=lambda *args, **kwargs: (model, FakeTokenizer()))
+    bundle = export(plan, tmp_path / "hybrid", save_graphs=True)
+    main = bundle.manifest["components"]["main"]
+    assert len(main["states"]) == 4
+    assert main["optimized"]
+    graph = json.loads((bundle.path / "main_graph.json").read_text())
+    assert sum(n["op"] == "gated_delta_update" for n in graph["nodes"]) == len(bundle.metadata["conv_layers"])
 
     async def check():
         options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-        async with converted.asset.executable(specialization_options=options) as executable:
-            fn = executable.load_function("main")
+        async with bundle.session(specialization_options=options) as session:
             for capacity, chunks in [(12, [3, 1, 2, 1]), (24, [1, 4, 1])]:
-                state = allocate_state(fn, NDArray, state_capacity=capacity)
+                session.reset_state({"main": capacity})
                 cache = model.make_cache()
                 offset = 0
                 for count in chunks:
                     ids = np.arange(offset + 1, offset + count + 1, dtype=np.int32)
                     expected = np.asarray(model(mx.array(ids[None]), cache=cache))
-                    actual = await run_main(fn, NDArray, ids, np.arange(offset, offset + count, dtype=np.int32),
-                                            state, input_name="input_ids", position_ids_name="position_ids")
-                    logits = actual[fn.desc.output_names[0]].numpy()
-                    np.testing.assert_allclose(state["recurrentState"].numpy(),
+                    actual = await session.run("main", {
+                        "input_ids": ids[None],
+                        "position_ids": np.arange(offset, offset + count, dtype=np.int32)[None],
+                    }, readback=True)
+                    logits = actual["logits"]
+                    np.testing.assert_allclose(session.snapshot_state("main")["recurrentState"],
                                                np.stack([np.asarray(c[1]) for c in cache[:-1]]),
                                                rtol=3e-3, atol=3e-4)
                     np.testing.assert_allclose(logits, expected, rtol=2e-3, atol=3e-4)

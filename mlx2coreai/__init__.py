@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from importlib import import_module
-from typing import Any
-
 from .conversion import (
     CapturedMLXGraph,
     ConversionConfig,
@@ -36,14 +33,6 @@ from .runtime import (
     validate_converted_model_sync,
 )
 
-_LAZY_EXPORTS = {
-    "MLXLMConversionInputs": "MLXLMConversionInputs",
-    "MLXLMStatefulConversion": ("._convert_mlx_lm_stateful", "MLXLMStatefulConversion"),
-    "build_mlx_lm_inputs": "build_mlx_lm_inputs",
-    "convert_mlx_lm": "convert_mlx_lm",
-    "convert_mlx_lm_stateful": ("._convert_mlx_lm_stateful", "convert_mlx_lm_stateful"),
-}
-
 __all__ = [
     "CapturedMLXGraph",
     "CaptureSignature",
@@ -55,19 +44,14 @@ __all__ = [
     "CoreAISession",
     "CoreAIValidationResult",
     "Graph",
-    "MLXLMConversionInputs",
-    "MLXLMStatefulConversion",
     "Node",
     "PreparedMLXGraph",
     "StateSpec",
     "StateBinding",
     "TensorSpec",
     "TensorType",
-    "build_mlx_lm_inputs",
     "capture_mlx_graph",
     "compare_coreai_outputs",
-    "convert_mlx_lm",
-    "convert_mlx_lm_stateful",
     "convert_mlx_to_coreai",
     "convert_prepared_mlx_to_coreai",
     "coreai_runtime_available",
@@ -84,17 +68,3 @@ __all__ = [
     "validate_converted_model",
     "validate_converted_model_sync",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    export = _LAZY_EXPORTS.get(name)
-    if export is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    if isinstance(export, tuple):
-        module_name, export_name = export
-    else:
-        module_name, export_name = "._convert_mlx_lm", export
-    module = import_module(module_name, __name__)
-    value = getattr(module, export_name)
-    globals()[name] = value
-    return value

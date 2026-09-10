@@ -5,7 +5,7 @@ import pytest
 
 from mlx2coreai.recipe import export
 from recipes import lfm2
-from tests.test_convert_mlx_lm import FakeTokenizer
+from tests.test_mlx_lm_source import FakeTokenizer
 
 
 def test_unresolved_expert_index_range_is_rejected():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -8,9 +9,11 @@ import sys
 import numpy as np
 import pytest
 
-from mlx2coreai import convert_mlx_lm_stateful
-from mlx2coreai._convert_mlx_lm_stateful import _infer_cache_layout, _make_state_specs
-from tests.test_convert_mlx_lm import FakeTokenizer
+from mlx2coreai.recipe import export
+from recipes import lfm2
+from recipes._mlx_lm.stateful import _make_state_specs
+from recipes.lfm2.adapter import cache_layout
+from tests.test_mlx_lm_source import FakeTokenizer
 
 
 def tiny_lfm2(*, two_attention_layers=False):
@@ -32,7 +35,7 @@ def tiny_lfm2(*, two_attention_layers=False):
 
 
 def test_lfm2_cache_layout():
-    layout = _infer_cache_layout(tiny_lfm2())
+    layout = cache_layout(tiny_lfm2())
     assert layout.short_conv_layers == (True, False, True)
     assert layout.num_short_conv_layers == layout.num_conv_layers == 2
     assert layout.num_linear_layers == 0
@@ -50,14 +53,14 @@ def test_lfm2_rejects_invalid_conv_cache_layout(cache_length):
     model = tiny_lfm2()
     model.layers[0].conv.L_cache = cache_length
     with pytest.raises(ValueError, match="uniform, positive cache shapes"):
-        _infer_cache_layout(model)
+        cache_layout(model)
 
 
 def test_lfm2_requires_attention_layer():
     model = tiny_lfm2()
     model.model.layers = [model.layers[0], model.layers[2]]
     with pytest.raises(ValueError, match="at least one full-attention layer"):
-        _infer_cache_layout(model)
+        cache_layout(model)
 
 
 @pytest.mark.parametrize("precision", [
@@ -72,7 +75,6 @@ def test_lfm2_requires_attention_layer():
 def test_lfm2_dynamic_prefill_decode(tmp_path, precision, two_attention_layers, request):
     import mlx.core as mx
     from coreai.runtime import SpecializationOptions, ComputeUnitKind
-    from mlx2coreai.runtime import CoreAISession
 
     if not SpecializationOptions.is_supported():
         pytest.skip("requires macOS 27 OS runtime")
@@ -97,33 +99,38 @@ def test_lfm2_dynamic_prefill_decode(tmp_path, precision, two_attention_layers, 
         assert result.returncode == 0, output
         return
     model = tiny_lfm2(two_attention_layers=two_attention_layers)
-    converted = convert_mlx_lm_stateful("tiny-lfm2", tmp_path / "lfm2", max_context_length=32,
-        compute_precision=precision,
-        load_fn=lambda *args, **kwargs: (model, FakeTokenizer()))
-    assert len(converted.state_specs) == 3
-    assert converted.lowered.optimized
-    assert not any(n.op == "gated_delta_update" for n in converted.main.normalized_graph.nodes)
-    assert converted.metadata["mlx_lm_stateful"]["num_attention_layers"] == (2 if two_attention_layers else 1)
+    plan = lfm2.build("tiny-lfm2", max_context_length=32, compute_precision=precision,
+                     load_fn=lambda *args, **kwargs: (model, FakeTokenizer()))
+    bundle = export(plan, tmp_path / "lfm2", save_graphs=True)
+    main = bundle.manifest["components"]["main"]
+    assert len(main["states"]) == 3
+    assert main["optimized"]
+    graph = json.loads((bundle.path / "main_graph.json").read_text())
+    assert not any(n["op"] == "gated_delta_update" for n in graph["nodes"])
+    assert len(bundle.metadata["attention_layers"]) == (2 if two_attention_layers else 1)
 
     async def check():
         options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-        async with CoreAISession(converted.asset, specialization_options=options) as session:
-            fn = session.function
+        async with bundle.session(specialization_options=options) as session:
             for capacity, chunks in [(12, [1, 2, 4, 1, 1]), (24, [5, 1, 3, 1]), (64, [21, 1, 5])]:
-                state = session.reset_state(state_capacity=capacity)
+                session.reset_state({"main": capacity})
                 cache = model.make_cache()
                 offset = 0
                 for count in chunks:
                     ids = np.arange(offset + 1, offset + count + 1, dtype=np.int32)
                     expected = np.asarray(model(mx.array(ids[None]), cache=cache).astype(mx.float32))
-                    actual = await session.run_tokens(ids, np.arange(offset, offset + count, dtype=np.int32))
-                    logits = actual[fn.desc.output_names[0]].numpy().astype(np.float32)
+                    actual = await session.run("main", {
+                        "input_ids": ids[None],
+                        "position_ids": np.arange(offset, offset + count, dtype=np.int32)[None],
+                    }, readback=True)
+                    logits = actual["logits"].astype(np.float32)
+                    state = session.snapshot_state("main")
                     conv_indices = (0, 2, 4) if two_attention_layers else (0, 2)
                     expected_conv = np.stack([np.asarray(cache[i][0].astype(mx.float32)) for i in conv_indices])
-                    actual_conv = state["convState"].numpy().astype(np.float32)
+                    actual_conv = state["convState"].astype(np.float32)
                     attention_indices = (1, 3) if two_attention_layers else (1,)
                     for state_name, cache_attr in (("keyCache", "keys"), ("valueCache", "values")):
-                        actual_cache = state[state_name].numpy().astype(np.float32)
+                        actual_cache = state[state_name].astype(np.float32)
                         expected_cache = np.stack([
                             np.asarray(getattr(cache[i], cache_attr)[..., :offset + count, :].astype(mx.float32))
                             for i in attention_indices

@@ -10,7 +10,6 @@ from typing import Any, Mapping
 import ml_dtypes
 import numpy as np
 
-from .bundle import resolve_asset_path
 from .dtypes import runtime_numpy_dtype as _runtime_dtype_to_numpy
 
 
@@ -148,16 +147,6 @@ class CoreAISession:
             state = self.state or None
         return await _call_function(function, self._bindings.NDArray, inputs, state, self._storage)
 
-    async def run_tokens(
-        self, token_ids: np.ndarray, position_ids: np.ndarray, *,
-        input_name: str = "input_ids", position_ids_name: str = "position_ids",
-        state: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return await self.run({
-            input_name: np.asarray(token_ids, dtype=np.int32)[None, :],
-            position_ids_name: np.asarray(position_ids, dtype=np.int32)[None, :],
-        }, state=state)
-
 
 async def _call_function(function, NDArray, inputs, state=None, storage_kind=None):
     kwargs = {"inputs": {
@@ -166,17 +155,6 @@ async def _call_function(function, NDArray, inputs, state=None, storage_kind=Non
     if state is not None:
         kwargs["state"] = state
     return await function(**kwargs)
-
-
-async def run_main(
-    function: Any, NDArray: Any, token_ids: np.ndarray, position_ids: np.ndarray,
-    state: dict[str, Any], *, input_name: str, position_ids_name: str,
-) -> dict[str, Any]:
-    """Compatibility helper for callers that manage their own executable."""
-    return await _call_function(function, NDArray, {
-        input_name: np.asarray(token_ids, dtype=np.int32)[None, :],
-        position_ids_name: np.asarray(position_ids, dtype=np.int32)[None, :],
-    }, state)
 
 
 def allocate_state(
@@ -551,7 +529,9 @@ def _load_coreai_runtime() -> _CoreAIRuntimeBindings:
 
 def _coerce_asset(asset_or_path: Any, AIModelAsset: Any) -> tuple[Any, Path | None]:
     if isinstance(asset_or_path, str | Path):
-        path = resolve_asset_path(asset_or_path)
+        path = Path(asset_or_path)
+        if path.suffix != ".aimodel":
+            raise ValueError("Expected an explicit .aimodel asset path; use Bundle.open() for recipe bundles.")
         return AIModelAsset.load(path), path
     if not hasattr(asset_or_path, "executable"):
         raise TypeError(
