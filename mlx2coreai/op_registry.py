@@ -328,7 +328,7 @@ def unsupported_op_details(graph: Graph) -> list[dict[str, Any]]:
                 )
             else:
                 recommendation = (
-                    "Classify this op in docs/ops_status.md and then implement or defer explicitly."
+                    "Implement a lowering for this op or explicitly mark it unsupported in the registry."
                 )
             details_by_op[normalized] = {
                 "op": normalized,

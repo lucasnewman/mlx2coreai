@@ -284,8 +284,8 @@ def _load_optional_module(name: str) -> Any | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m mlx2coreai.op_coverage")
-    parser.add_argument("--output", type=Path, default=Path("docs/op_coverage.md"))
-    parser.add_argument("--json-output", type=Path, default=Path("docs/op_coverage.json"))
+    parser.add_argument("--output", type=Path, default=Path("dev/op_coverage.md"))
+    parser.add_argument("--json-output", type=Path, default=Path("dev/op_coverage.json"))
     parser.add_argument("--model-zoo-module", default="tests.model_zoo")
     parser.add_argument("--validate-assets", action="store_true")
     args = parser.parse_args(argv)

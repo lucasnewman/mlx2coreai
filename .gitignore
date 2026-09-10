@@ -3,6 +3,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .build/
-*.aimodel/
-*.aimodels/
 artifacts/
+dev/

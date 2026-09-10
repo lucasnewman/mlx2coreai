@@ -15,8 +15,8 @@ def main(argv: list[str] | None = None) -> int:
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a saved .aimodel bundle.")
     inspect_parser.add_argument("path", type=Path)
     ops_parser = subparsers.add_parser("ops", help="Generate an op coverage report.")
-    ops_parser.add_argument("--output", type=Path, default=Path("docs/op_coverage.md"))
-    ops_parser.add_argument("--json-output", type=Path, default=Path("docs/op_coverage.json"))
+    ops_parser.add_argument("--output", type=Path, default=Path("dev/op_coverage.md"))
+    ops_parser.add_argument("--json-output", type=Path, default=Path("dev/op_coverage.json"))
     ops_parser.add_argument("--model-zoo-module", default="tests.model_zoo")
     ops_parser.add_argument("--validate-assets", action="store_true")
     lm_parser = subparsers.add_parser(
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     stateful_parser.add_argument("--no-optimize", action="store_true")
     stateful_parser.add_argument("--gated-delta-implementation", choices=["native", "decomposed"], default="native",
-                                 help="Experimental gated-delta lowering; see docs/qwen35_conversion.md for runtime limitations.")
+                                 help="Experimental gated-delta lowering; see docs/lm_recipes.md for runtime limitations.")
     args = parser.parse_args(argv)
 
     if args.command == "inspect":

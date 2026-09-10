@@ -5,32 +5,25 @@ Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) 
 `mlx2coreai` captures MLX graphs, lowers supported ops to CoreAI MLIR, and writes
 `.aimodel` assets or coreai-models-style LLM bundles.
 
-See the [compression IR contracts](docs/compression.md) for affine, blockwise,
-LUT, and sparse weight operations, including packed integer storage and beta
-runtime limitations.
+Start with [model recipes](recipes/README.md) for conversion and execution:
 
-See the [architecture and refactoring notes](docs/refactoring.md) for the
-conversion pipeline, extension points, and full-model correctness gates.
-See [model recipes](recipes/README.md) for the model-local build/run interface.
-Mimi, Pocket TTS, Qwen3, Qwen3.5, and LFM2/2.5 have recipes; adapters and
-execution policy live under `recipes/`, not in the conversion core.
-Post-refactor [Qwen and SmartTurn validation](docs/qwen_smart_turn_validation.md)
-records numerical results and the SmartTurn optimizer limitation.
+- [Language models](docs/lm_recipes.md): Qwen3, Qwen3.5, LFM2/2.5, and LFM2 MoE.
+- [Audio models](docs/audio_recipes.md): offline Mimi, streaming Pocket TTS, and
+  SmartTurn conversion.
 
-Mimi's offline FP32 encoder and decoder from mlx-audio also convert with dynamic
-sequence lengths. See [Mimi conversion](docs/mimi_conversion.md) for validated
-artifacts, reproduction commands, and the separate streaming work still needed.
-
-Pocket TTS from mlx-audio has a validated FP32 pipeline with mutable transformer
-KV caches and streaming audio-decoder convolution state. See
-[Pocket TTS conversion](docs/pocket_tts_conversion.md) for generation commands,
-parity results, performance, and the beta-runtime layer-partitioning workaround.
+This project uses a beta SDK. Check each model's compatibility warnings;
+successful export does not guarantee correct execution.
 
 ## Install
 
 ```bash
 pip install mlx2coreai
 ```
+
+Python 3.11 or later is required. GPU-preferred execution requires macOS 27
+and compatible CoreAI developer tools. Audio conversion additionally requires
+`mlx-audio`; Pocket TTS also requires SentencePiece. Commands under `scripts/`
+are intended to run from a repository checkout.
 
 ## Convert an mlx-lm Model
 
@@ -60,21 +53,11 @@ mlx2coreai convert-mlx-lm-stateful mlx-community/Qwen3-0.6B-bf16 \
 The exported model has one `main` entrypoint with `input_ids`, `position_ids`,
 and mutable `keyCache` / `valueCache` state.
 
-Qwen3.5 hybrid text-decoder export is **experimental, not runtime-validated**.
-It preserves unquantized BF16 weights and adds convolution and FP32 recurrent
-states. The native gated-delta op currently corrupts integrated outputs on
-macOS 27 build 26A428; a dynamic decomposed alternative hits a compiler error
-in the hybrid graph. See [Qwen3.5 conversion notes](docs/qwen35_conversion.md)
-for artifacts, validation commands, and reduced repros. No fixed-length
-execution workaround is used.
-
-LFM2.5-2.6B export has **validated FP32 logit and state parity** after correcting
-a packed KV-cache read failure in the beta runtime. It uses
-the existing `mlx-lm` implementation and adds short-convolution cache support,
-without gated-delta ops or fixed-length execution. Reduced-precision execution
-still needs separate validation; FP16 can abort during compilation. Use the Python
-runner with `--grow-context` for its three-state contract. See
-[LFM2.5 conversion notes](docs/lfm25_conversion.md) for artifacts and repros.
+Qwen3.5 and LFM2 MoE execution are experimental. LFM2.5 full-model parity also
+remains unresolved, and reduced-precision LFM execution can fail compilation.
+See the [language-model guide](docs/lm_recipes.md) before choosing a checkpoint
+or precision. For legacy LFM bundles, use the Python runner with `--grow-context`
+to support their additional convolution state.
 
 ## Benchmark Sampling
 
@@ -113,8 +96,8 @@ outside the timed interval. JSON output no longer implicitly selects Python;
 specify `--runtime-backend` when comparing runners. Synthetic benchmarks honor
 `--fill-token-id` even when a bundle tokenizer is present.
 
-See [macOS 27 benchmark notes](docs/macos27_benchmark.md) for tested package
-versions, runtime limitations, and results.
+Use `--help` for the complete benchmark options. Benchmark only assets whose
+outputs you have validated against the source model.
 
 ## Convert a Generic MLX Function
 
@@ -175,7 +158,8 @@ from mlx2coreai import run_aimodel
 async def main():
     result = await run_aimodel(
         "artifacts/model.aimodel",
-        {"x": np.ones((2, 3), dtype=np.float32)},
+        {"x": np.ones((2, 3), dtype=np.float32),
+         "w": np.ones((3, 4), dtype=np.float32)},
     )
     print(result.outputs)
 

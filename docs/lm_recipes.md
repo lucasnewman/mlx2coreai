@@ -1,52 +1,77 @@
 # Language-Model Recipes
 
-`recipes.qwen3`, `recipes.qwen35`, and `recipes.lfm2` use the same `build` /
-`Request` / `run` convention as Mimi and Pocket TTS. Each recipe owns its family
-adaptations and precision restrictions. Shared MLX-LM scaffolding lives in
-`recipes/_mlx_lm`, not in the conversion core.
+Use `recipes.qwen3`, `recipes.qwen35`, or `recipes.lfm2` to convert a supported
+MLX-LM checkpoint and generate text with CoreAI. GPU-preferred execution
+requires macOS 27 and a compatible CoreAI SDK. Keep model assets in `artifacts/`.
 
 ## Build and Run
 
 ```bash
 python -m recipes.qwen3 convert --output artifacts/recipes/qwen3_fp32
-python -m recipes.lfm2 convert --output artifacts/recipes/lfm25_fp32
-python -m recipes.qwen35 convert --output artifacts/recipes/qwen35_bf16
-
 python -m recipes.qwen3 run artifacts/recipes/qwen3_fp32 --chat \
-  --prompt "What is the capital of France? Answer in one short sentence." \
-  --max-new-tokens 32
-python -m recipes.lfm2 run artifacts/recipes/lfm25_fp32 --chat \
-  --prompt "What is the capital of France? Answer in one short sentence." \
-  --max-new-tokens 32
+  --prompt "What is the capital of France?" --max-new-tokens 32
 ```
 
-Default sources are `mlx-community/Qwen3-0.6B-bf16`, `Qwen/Qwen3.5-0.8B`, and
-`LiquidAI/LFM2.5-2.6B-MLX-bf16`. The tested Qwen3 checkpoint is **0.6B**, not
-0.8B. Supply an optional positional source path or Hub ID to `convert`, and
-`--revision` to pin a Hub revision. No new quantization is applied.
+| Recipe | Default checkpoint | Default precision | Status |
+| --- | --- | --- | --- |
+| `qwen3` | `mlx-community/Qwen3-0.6B-bf16` | FP32 | Validated generation |
+| `qwen35` | `Qwen/Qwen3.5-0.8B` | Source precision (BF16) | Experimental; decoding parity unresolved |
+| `lfm2` | `LiquidAI/LFM2.5-2.6B-MLX-bf16` | FP32 | Exports; full-model parity remains unresolved |
 
-The LFM recipe also accepts `LiquidAI/LFM2-8B-A1B` through MLX-LM's `lfm2_moe`
-implementation. See [MoE conversion notes](lfm2_moe_conversion.md) for the
-expert-dispatch adaptation, memory requirements, and validation status.
+The LFM recipe also accepts `LiquidAI/LFM2-8B-A1B`. MoE execution is experimental:
+it can produce incorrect cache contents and encounter Metal command-buffer
+errors. Export success is not a guarantee of correct generation.
 
-Qwen3 and LFM default to FP32; Qwen3.5 defaults to source precision (`auto`,
-BF16 for this checkpoint), retaining FP32 recurrent state. Override with
-`--compute-precision` and `--cache-dtype` only when intentionally testing other
-precision policies. Metadata records these choices and the known workarounds.
+Supply a checkpoint directory or Hub ID as the positional conversion argument.
+Use `--revision` to pin a Hub revision:
 
-All three export one `main.aimodel`, `tokenizer/`, and the generic recipe
-`manifest.json`. This is different from the old `metadata.json` LLM bundle:
-the original converter and benchmark commands remain unchanged, but do not
-consume recipe manifests. Use the recipe's `run` command for new bundles.
+```bash
+python -m recipes.lfm2 convert LiquidAI/LFM2-8B-A1B \
+  --revision c1c44ff9fc00db3ebf4516970563f5f383d23670 \
+  --output artifacts/recipes/lfm2_moe_fp32
+```
+
+Missing checkpoint files can be downloaded during conversion. No additional
+weight quantization is applied. FP32 exports can be much larger than source
+BF16 weights; the LFM MoE asset is approximately 32 GiB and conversion needs
+additional working memory and disk space.
+
+`--compute-precision` selects `auto`, `fp32`, `fp16`, or `bf16`.
+`--cache-dtype` independently selects cache precision. Reduced-precision LFM
+execution can fail validation or compilation; FP32 is the correctness baseline,
+not a guarantee that every model passes. Experimental bundles require
+`--allow-experimental` for diagnostic execution.
+
+Each bundle contains `manifest.json`, a packaged tokenizer, and `main.aimodel`.
+Use the recipe's `run` command, not the legacy sampling benchmark, with these
+bundles. Conversion and optional MLX validation need MLX-LM; normal generation
+does not load the source checkpoint.
+
+## Generation Options
+
+- `--chat` formats the prompt using the packaged tokenizer's chat template.
+- `--max-new-tokens` sets the generation budget. Generation normally stops at EOS;
+  `--ignore-eos` overrides that behavior for diagnostics.
+- `--temperature 0` selects greedy generation. Positive temperatures support
+  sampling with `--top-k` and `--seed`.
+- `--prefill-chunk-size` sets the usual prefill chunk size. `--prefill-chunks 3,5`
+  specifies initial chunk lengths before the remaining prompt is processed.
+- `--state-capacity` allocates room for prompt and generated tokens. It must be
+  at least the prompt length plus the requested generation budget.
+- `--json-output results.json` saves generated text, token IDs, and timings.
+
+Query length and cache capacity are dynamic. Conversion's `--max-context-length`
+sets the capture example, not a fixed execution length. Each request resets its
+state; do not run concurrent requests through the same session.
+
+## Python API
 
 ```python
 from coreai.runtime import ComputeUnitKind, SpecializationOptions
-from mlx2coreai.recipe import Bundle, export
+from mlx2coreai.recipe import Bundle
 from recipes import qwen3
 
-bundle = export(qwen3.build(), "artifacts/recipes/my_qwen")
-# In a later process, without the source model:
-bundle = Bundle.open("artifacts/recipes/my_qwen")
+bundle = Bundle.open("artifacts/recipes/qwen3_fp32")
 options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
 
 async def generate():
@@ -56,97 +81,25 @@ async def generate():
             print(token_id)
 ```
 
-Use `token_ids=(...)` instead of `prompt` to bypass tokenization. Runtime loads
-only the packaged tokenizer, never the checkpoint or MLX-LM. `run` yields token
-IDs; the CLI decodes them and emits a JSON report. `temperature=0` is greedy;
-positive temperature supports seeded sampling with optional `top_k`.
+Use `token_ids=(...)` instead of `prompt` to bypass tokenization. For experimental
+models, inspect `bundle.metadata["experimental"]` before opening a session and
+explicitly set `Request(allow_experimental=True, ...)` only for diagnostics.
 
-## State and Execution
-
-Query length and KV capacity remain dynamic. `--max-context-length` at conversion
-sets the capture example, not a fixed execution length. At runtime, capacity
-defaults to prompt length plus generation budget; `--state-capacity` selects
-a larger allocation. Too-small allocations are rejected before inference.
-
-Prefill uses variable-length chunks (`--prefill-chunk-size`, or initial explicit
-sizes with `--prefill-chunks 3,5`). Decode advances position on every call.
-Each request resets all buffers and host positions, including after an
-interrupted previous request. Requests within a session must be serial.
-
-- Qwen3 has `keyCache` and `valueCache`.
-- LFM adds `convState`, whose history length is architectural, not query length.
-- Qwen3.5 adds both convolution history and FP32 `recurrentState`.
-
-The shared cache adapter retains the per-layer gather/select workaround and
-final packing. Model-local adapters select which layers consume each state.
-LFM additionally materializes each convolution-history update with a gather
-before packing as an experiment targeting possible slice-view / fixed-reshape
-aliasing. Repeat validation still fails; this is not a confirmed fix.
-The adapter lives in `recipes/lfm2/adapter.py`;
-the legacy converter selects the same adapter through recipe-local policy.
-Normal generation does not read KV/conv/recurrent buffers back to the CPU.
-
-## Validation and Limits
+## Validate a Conversion
 
 ```bash
 python -m recipes.qwen3 run artifacts/recipes/qwen3_fp32 --chat \
-  --prefill-chunks 3,5 --max-new-tokens 33 --state-capacity 2048 \
-  --ignore-eos --validate-mlx \
+  --prompt "What is the capital of France?" --prefill-chunks 3,5 \
+  --max-new-tokens 32 --state-capacity 2048 --validate-mlx \
   --json-output artifacts/recipes/qwen3_fp32/validation.json
 ```
 
-Use the same arguments with `recipes.lfm2` and its bundle. The optional native
-observer checks logits and every occupied state against an independent MLX
-forward pass after each call, and checks that unused KV tails remain zero.
-Validation fails if either the maximum absolute error or relative L2 error
-exceeds its tolerance (both default to 0.01). It also records greedy-token
-agreement. `--source` can override a moved validation checkpoint.
+Validation compares logits and cache state against MLX. `--source` overrides
+the source checkpoint path if it moved. The default maximum absolute and
+relative L2 error bounds are both 0.01; set `--max-abs-error` and
+`--max-relative-l2` deliberately if using a different precision policy.
 
-Validation timings include reference execution and state readbacks; they are
-not inference benchmarks. Omit `--validate-mlx` for normal generation.
-
-Do not disable authoring optimization on mutable-state components in this SDK:
-that pass also promotes buffer arguments to runtime state. Recipe export rejects
-such configurations instead of publishing a bundle with missing state.
-
-Qwen3.5 is still **experimental**, regardless of precision. Its known native
-gated-delta corruption and decomposed-loop compiler failure are not solved by
-moving to recipes. LFM reduced precision and mixed compute/cache precision
-also require explicit `--allow-experimental` for diagnostic execution. The CLI
-checks this before loading an executable, because beta failures can abort
-during specialization. Library callers must check experimental metadata before
-opening a session; `run` additionally guards before inference.
-
-Qwen3 BF16 has measured logit drift and is not a close-parity baseline, though
-it can execute. See the original [Qwen validation](qwen_smart_turn_validation.md),
-[Qwen3.5](qwen35_conversion.md), and [LFM2.5](lfm25_conversion.md) notes for the
-runtime investigations. The migration retains their existing expected failures
-rather than masking them with fixed-length graphs or MLX fallbacks.
-
-## Checkpoint Verification
-
-Re-exported from cached unquantized checkpoints on macOS 27 build 26A428 with
-CoreAI 1.0.0b2, MLX 0.32.2, and MLX-LM 0.31.3. Original assets were retained;
-new bundles and reports are under `artifacts/recipes/`.
-
-Qwen3-0.6B FP32 passes 35 calls (3/5/remainder prefill, then 32 advancing decode
-steps) at capacity 2048, beyond the capture capacity of 256. All 35 greedy-token
-comparisons match MLX. Maximum absolute errors are 1.241e-4 for logits,
-8.240e-4 for keys, and 7.877e-4 for values; unused KV tails remain zero.
-
-LFM2.5-2.6B FP32 with recipe-local gather materialization passed one 35-call
-comparison at capacity 2048 with matching greedy tokens, but the process later
-reported a disk-space error. A repeat failed at position 8 with maximum absolute
-logit error 5.082. Full-model recipe parity is therefore unresolved; the saved
-successful validation report must not be treated as reproducible verification.
-The initial slice-view packing export failed during decode, and switching buffer
-backing did not fix it. The old validated asset passed the same request and
-observer once. Graph comparison identified a packing difference worth testing,
-but has not established a root cause.
-
-The full Qwen3.5-0.8B BF16 checkpoint exports and verifies as an optimized
-2,916-node component with two dynamic KV states, BF16 convolution state, and
-FP32 recurrent state. The CLI correctly refuses execution without opt-in.
-This is an export/contract check, not a new full-model numerical parity claim.
-
-The full suite passes **290 tests, with five existing expected failures**.
+Validation loads both implementations and uses additional memory. Do not use
+its timings as inference benchmarks. Omit `--validate-mlx` for normal execution.
+The largest FP32 models may not fit alongside their MLX reference on the same
+machine. See [model recipes](../recipes/README.md) for bundle and session usage.
