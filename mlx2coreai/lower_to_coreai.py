@@ -43,6 +43,8 @@ from .op_registry import coreai_op_for_mlx, rule_for_mlx
 from .op_rules import less_equal
 from .passes import AnalyzedGraph, analyze_graph, infer_broadcast_axes_shape
 from . import _control_flow
+from . import _compression
+from . import _pooling
 
 
 @dataclass(slots=True)
@@ -109,6 +111,9 @@ class LoweredCoreAIProgram:
 
 
 def _element_type(dtype: str) -> Type:
+    if dtype in _compression.PACKED_INTS:
+        factory = IntegerType.get_unsigned if dtype.startswith('u') else IntegerType.get_signed
+        return factory(_compression.PACKED_INTS[dtype])
     dtype = _normalize_dtype(dtype)
     if dtype == "fp16":
         return F16Type.get()
@@ -118,6 +123,10 @@ def _element_type(dtype: str) -> Type:
         return F32Type.get()
     if dtype == "int32":
         return IntegerType.get_signed(32)
+    if dtype == "int8":
+        return IntegerType.get_signed(8)
+    if dtype == "uint8":
+        return IntegerType.get_unsigned(8)
     if dtype == "int64":
         # CoreAI can represent si64 in MLIR, but the runtime stack is
         # generally <=32-bit oriented. Input types are narrowed to match the
@@ -370,6 +379,10 @@ def _as_int_list(value: Any, count: int, *, default: int = 1) -> list[int]:
 
 
 class CoreAILowerer:
+    _emit_adaptive_average = _pooling.emit_adaptive_average
+    _emit_affine = _compression.emit_affine
+    _emit_lut = _compression.emit_lut
+    _emit_sparse = _compression.emit_sparse
     _emit_cond = _control_flow.emit_cond
     _emit_while = _control_flow.emit_while
 
@@ -439,6 +452,8 @@ class CoreAILowerer:
                                 if len(values) != len(node.outputs):
                                     raise ValueError(f"{node.op} produced {len(values)} values for {len(node.outputs)} outputs.")
                                 self.env.update(zip(node.outputs, values, strict=True))
+                            if any(self.inferred[name].dtype in _compression.PACKED_INTS for name in graph.outputs):
+                                raise ValueError('Packed sub-byte tensors must be constants or internal values, not public runtime outputs.')
                             outputs = OrderedDict(
                                 (self._coreai_output_name(graph, name), self.env[name])
                                 for name in graph.outputs
@@ -487,6 +502,8 @@ class CoreAILowerer:
         for spec in graph.inputs:
             if self.config.externalize_weights and spec.name in constants:
                 continue
+            if spec.dtype in _compression.PACKED_INTS:
+                raise ValueError('Packed sub-byte tensors must be constants or internal values, not public runtime inputs.')
             if public_names is not None and spec.name not in public_names:
                 self.unresolved_extra_inputs.append(spec.name)
             out.append(spec)
@@ -508,6 +525,16 @@ class CoreAILowerer:
                 )
 
     def _constant(self, name: str, value: Any, *, dtype: str | None = None, source: str = "constant") -> Value:
+        if dtype in _compression.PACKED_INTS:
+            arr = np.asarray(value)
+            packed = _compression.pack_integer_constant(arr, dtype)
+            resource_name = _resource_name(name)
+            tensor_type = RankedTensorType.get(list(arr.shape), _element_type(dtype))
+            attr = DenseResourceElementsAttr.get_from_buffer(packed, resource_name, tensor_type)
+            self.weight_manifest.append(WeightInfo(name=name, shape=arr.shape, dtype=dtype,
+                source=source, storage='resource', nbytes=packed.nbytes, resource_name=resource_name,
+                external_weight_threshold=int(self.config.external_weight_threshold)))
+            return coreai.ConstantOp(value=attr, loc=self.location).result
         arr, downcast = _array_to_coreai(value, dtype)
         storage = "resource" if self._should_use_resource_constant(arr) else "inline"
         resource_name = _resource_name(name) if storage == "resource" else None
@@ -737,6 +764,16 @@ class CoreAILowerer:
         x, y = self.env[node.inputs[0]], self.env[node.inputs[1]]
         x, y = _align_binary_operands(x, y)
         return fn(x, y)
+
+    def _emit_complex(self, node: Node, *, polar=False) -> Value:
+        left, right = node.inputs
+        if any(not _is_float_element_type(self.env[name]) for name in (left, right)):
+            raise ValueError('Complex construction requires real floating-point inputs.')
+        a = coreai.cast(self._lower_broadcast_axes(Node('broadcast_axes', (left, right), node.output)), np.float32)
+        b = coreai.cast(self._lower_broadcast_axes(Node('broadcast_axes', (right, left), node.output)), np.float32)
+        if polar:
+            a, b = coreai.broadcasting_mul(a, coreai.cos(b)), coreai.broadcasting_mul(a, coreai.sin(b))
+        return coreai.create_complex(a, b)
 
     def _emit_inverse(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]

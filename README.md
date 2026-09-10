@@ -5,6 +5,10 @@ Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) 
 `mlx2coreai` captures MLX graphs, lowers supported ops to CoreAI MLIR, and writes
 `.aimodel` assets or coreai-models-style LLM bundles.
 
+See the [compression IR contracts](docs/compression.md) for affine, blockwise,
+LUT, and sparse weight operations, including packed integer storage and beta
+runtime limitations.
+
 See the [architecture and refactoring notes](docs/refactoring.md) for the
 conversion pipeline, extension points, and full-model correctness gates.
 See [model recipes](recipes/README.md) for the model-local build/run interface.

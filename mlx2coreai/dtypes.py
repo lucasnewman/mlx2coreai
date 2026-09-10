@@ -32,6 +32,8 @@ def normalize_dtype(dtype: str) -> str:
 
 def execution_numpy_dtype(dtype: str) -> Any:
     dtype = normalize_dtype(dtype)
+    if dtype in {"int8", "uint8"}:
+        return np.dtype(dtype).type
     if dtype == "fp16":
         return np.float16
     if dtype == "bf16":
@@ -52,25 +54,24 @@ def constant_array(value: Any, dtype_hint: str | None = None) -> tuple[np.ndarra
     downcast: str | None = None
     if dtype_hint is not None:
         dtype_hint = normalize_dtype(dtype_hint)
-
-    if arr.dtype == np.float64 or dtype_hint == "fp64":
-        arr = arr.astype(np.float32)
+        target = np.dtype(execution_numpy_dtype(dtype_hint))
+    else:
+        target = {np.dtype('float64'): np.dtype('float32'), np.dtype('int64'): np.dtype('int32')}.get(arr.dtype, arr.dtype)
+    if (arr.dtype == np.float64 or dtype_hint == 'fp64') and target == np.float32:
         downcast = "fp64->fp32"
-    elif arr.dtype == np.int64 or dtype_hint == "int64":
+    if (arr.dtype == np.int64 or dtype_hint == 'int64') and target == np.int32:
         if arr.size and (arr.min() < np.iinfo(np.int32).min or arr.max() > np.iinfo(np.int32).max):
             raise ValueError("int64 constant cannot be safely downcast to int32.")
-        arr = arr.astype(np.int32)
         downcast = "int64->int32"
-    elif dtype_hint == "bf16":
-        arr = arr.astype(ml_dtypes.bfloat16)
-    elif dtype_hint is not None:
-        arr = arr.astype(execution_numpy_dtype(dtype_hint))
+    arr = arr.astype(target, copy=False)
     # ascontiguousarray promotes scalar tensors to rank one.
     return np.ascontiguousarray(arr).reshape(arr.shape), downcast
 
 
 def capture_numpy_dtype(dtype: np.dtype) -> str:
     dtype = np.dtype(dtype)
+    if dtype in {np.dtype('int8'), np.dtype('uint8')}:
+        return str(dtype)
     if dtype == ml_dtypes.bfloat16:
         return "bf16"
     if dtype == np.float16:
@@ -104,6 +105,8 @@ def capture_mlx_dtype(dtype: Any) -> str:
     if isinstance(dtype, np.dtype):
         return capture_numpy_dtype(dtype)
     text = str(dtype).strip().lower()
+    if text.rsplit('.', 1)[-1] in {'int8', 'uint8'}:
+        return text.rsplit('.', 1)[-1]
     if text.endswith('complex64'):
         return 'complex64'
     if "bfloat16" in text or text.endswith("bf16"):
@@ -124,6 +127,8 @@ def capture_mlx_dtype(dtype: Any) -> str:
 def runtime_numpy_dtype(dtype: Any) -> Any:
     text = str(dtype).strip().lower()
     for aliases, result in (
+        (("uint8",), np.uint8),
+        (("int8",), np.int8),
         (("bfloat16", "bf16"), ml_dtypes.bfloat16),
         (("float16", "fp16"), np.float16),
         (("float32", "fp32"), np.float32),

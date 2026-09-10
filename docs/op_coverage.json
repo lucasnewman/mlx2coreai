@@ -7,12 +7,16 @@
     "mlx": "0.32.2"
   },
   "registry": {
-    "supported_source_op_names": 198,
-    "lowering_keys": 155,
+    "supported_source_op_names": 206,
+    "lowering_keys": 163,
     "ops": [
       {
         "op": "abs",
         "lowering": "abs"
+      },
+      {
+        "op": "adaptive_avg_pool",
+        "lowering": "adaptive_avg_pool"
       },
       {
         "op": "add",
@@ -21,6 +25,14 @@
       {
         "op": "addmm",
         "lowering": "addmm"
+      },
+      {
+        "op": "affine_dequantize",
+        "lowering": "affine_dequantize"
+      },
+      {
+        "op": "affine_quantize",
+        "lowering": "affine_quantize"
       },
       {
         "op": "all",
@@ -119,6 +131,10 @@
         "lowering": "bitwisebinary"
       },
       {
+        "op": "blockwise_shift_scale",
+        "lowering": "blockwise_shift_scale"
+      },
+      {
         "op": "broadcast",
         "lowering": "broadcast_to"
       },
@@ -141,6 +157,10 @@
       {
         "op": "ceil",
         "lowering": "ceil"
+      },
+      {
+        "op": "complex",
+        "lowering": "complex"
       },
       {
         "op": "concatenate",
@@ -435,6 +455,10 @@
         "lowering": "reduce_log_sum_exp"
       },
       {
+        "op": "lut_to_dense",
+        "lowering": "lut_to_dense"
+      },
+      {
         "op": "masked_scatter",
         "lowering": "masked_scatter"
       },
@@ -525,6 +549,10 @@
       {
         "op": "partition",
         "lowering": "sort"
+      },
+      {
+        "op": "polar",
+        "lowering": "polar"
       },
       {
         "op": "pow",
@@ -683,6 +711,10 @@
         "lowering": "sort"
       },
       {
+        "op": "sparse_to_dense",
+        "lowering": "sparse_to_dense"
+      },
+      {
         "op": "split",
         "lowering": "split"
       },
@@ -814,10 +846,10 @@
       "tests.model_zoo",
       "tests.coverage_zoo"
     ],
-    "model_count": 31,
-    "node_count": 296,
-    "unique_source_ops": 198,
-    "unique_lowering_keys": 155,
+    "model_count": 33,
+    "node_count": 314,
+    "unique_source_ops": 206,
+    "unique_lowering_keys": 163,
     "asset_validation_enabled": true,
     "asset_validation_passed": true,
     "unsupported_exercised_ops": [],
@@ -829,6 +861,14 @@
         "node_count": 1,
         "models": [
           "supplemental_unary_canonical"
+        ]
+      },
+      {
+        "op": "adaptive_avg_pool",
+        "lowering": "adaptive_avg_pool",
+        "node_count": 1,
+        "models": [
+          "supplemental_adaptive_pooling"
         ]
       },
       {
@@ -855,6 +895,22 @@
         "node_count": 2,
         "models": [
           "mlp_2layer"
+        ]
+      },
+      {
+        "op": "affine_dequantize",
+        "lowering": "affine_dequantize",
+        "node_count": 1,
+        "models": [
+          "supplemental_compression"
+        ]
+      },
+      {
+        "op": "affine_quantize",
+        "lowering": "affine_quantize",
+        "node_count": 1,
+        "models": [
+          "supplemental_compression"
         ]
       },
       {
@@ -1050,6 +1106,14 @@
         ]
       },
       {
+        "op": "blockwise_shift_scale",
+        "lowering": "blockwise_shift_scale",
+        "node_count": 1,
+        "models": [
+          "supplemental_compression"
+        ]
+      },
+      {
         "op": "broadcast",
         "lowering": "broadcast_to",
         "node_count": 1,
@@ -1101,6 +1165,14 @@
         ]
       },
       {
+        "op": "complex",
+        "lowering": "complex",
+        "node_count": 1,
+        "models": [
+          "supplemental_complex_ops"
+        ]
+      },
+      {
         "op": "concatenate",
         "lowering": "concat",
         "node_count": 1,
@@ -1135,9 +1207,10 @@
       {
         "op": "constant",
         "lowering": "const",
-        "node_count": 2,
+        "node_count": 12,
         "models": [
           "reduction_suite",
+          "supplemental_compression",
           "supplemental_constants_identity"
         ]
       },
@@ -1686,6 +1759,14 @@
         ]
       },
       {
+        "op": "lut_to_dense",
+        "lowering": "lut_to_dense",
+        "node_count": 1,
+        "models": [
+          "supplemental_compression"
+        ]
+      },
+      {
         "op": "masked_scatter",
         "lowering": "masked_scatter",
         "node_count": 1,
@@ -1869,6 +1950,14 @@
         "node_count": 1,
         "models": [
           "supplemental_extended_ops"
+        ]
+      },
+      {
+        "op": "polar",
+        "lowering": "polar",
+        "node_count": 1,
+        "models": [
+          "supplemental_complex_ops"
         ]
       },
       {
@@ -2184,6 +2273,14 @@
         ]
       },
       {
+        "op": "sparse_to_dense",
+        "lowering": "sparse_to_dense",
+        "node_count": 1,
+        "models": [
+          "supplemental_compression"
+        ]
+      },
+      {
         "op": "split",
         "lowering": "split",
         "node_count": 1,
@@ -2446,12 +2543,24 @@
         "node_count": 1
       },
       {
+        "lowering": "adaptive_avg_pool",
+        "node_count": 1
+      },
+      {
         "lowering": "add",
         "node_count": 38
       },
       {
         "lowering": "addmm",
         "node_count": 2
+      },
+      {
+        "lowering": "affine_dequantize",
+        "node_count": 1
+      },
+      {
+        "lowering": "affine_quantize",
+        "node_count": 1
       },
       {
         "lowering": "all",
@@ -2522,6 +2631,10 @@
         "node_count": 1
       },
       {
+        "lowering": "blockwise_shift_scale",
+        "node_count": 1
+      },
+      {
         "lowering": "broadcast_arrays",
         "node_count": 2
       },
@@ -2542,6 +2655,10 @@
         "node_count": 1
       },
       {
+        "lowering": "complex",
+        "node_count": 1
+      },
+      {
         "lowering": "concat",
         "node_count": 1
       },
@@ -2555,7 +2672,7 @@
       },
       {
         "lowering": "const",
-        "node_count": 3
+        "node_count": 13
       },
       {
         "lowering": "conv",
@@ -2758,6 +2875,10 @@
         "node_count": 2
       },
       {
+        "lowering": "lut_to_dense",
+        "node_count": 1
+      },
+      {
         "lowering": "masked_scatter",
         "node_count": 1
       },
@@ -2823,6 +2944,10 @@
       },
       {
         "lowering": "pad",
+        "node_count": 1
+      },
+      {
+        "lowering": "polar",
         "node_count": 1
       },
       {
@@ -2956,6 +3081,10 @@
       {
         "lowering": "sort",
         "node_count": 2
+      },
+      {
+        "lowering": "sparse_to_dense",
+        "node_count": 1
       },
       {
         "lowering": "split",
@@ -3310,6 +3439,16 @@
       },
       {
         "module": "tests.coverage_zoo",
+        "name": "supplemental_adaptive_pooling",
+        "node_count": 1,
+        "unique_ops": [
+          "adaptive_avg_pool"
+        ],
+        "asset_validated": true,
+        "validation_error": null
+      },
+      {
+        "module": "tests.coverage_zoo",
         "name": "supplemental_aliases_and_bitwise",
         "node_count": 9,
         "unique_ops": [
@@ -3350,12 +3489,29 @@
       {
         "module": "tests.coverage_zoo",
         "name": "supplemental_complex_ops",
-        "node_count": 4,
+        "node_count": 6,
         "unique_ops": [
+          "complex",
           "conjugate",
           "imag",
+          "polar",
           "real",
           "view"
+        ],
+        "asset_validated": true,
+        "validation_error": null
+      },
+      {
+        "module": "tests.coverage_zoo",
+        "name": "supplemental_compression",
+        "node_count": 15,
+        "unique_ops": [
+          "affine_dequantize",
+          "affine_quantize",
+          "blockwise_shift_scale",
+          "constant",
+          "lut_to_dense",
+          "sparse_to_dense"
         ],
         "asset_validated": true,
         "validation_error": null

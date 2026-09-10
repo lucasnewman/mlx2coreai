@@ -12,6 +12,8 @@ from typing import Callable
 from . import _op_attrs as attrs, _type_inference as types
 from . import _elementwise as elementwise
 from . import _control_flow as control_flow
+from . import _compression as compression
+from . import _pooling as pooling
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,14 @@ def less_equal(lhs, rhs):
 
 
 _RULES = (
+    OpRule('adaptive_avg_pool', ('adaptive_avg_pool',), _lower('_emit_adaptive_average'), None, pooling.infer_adaptive_average),
+    OpRule('complex', ('complex',), _lower('_emit_complex'), None, types.infer_complex_construction),
+    OpRule('polar', ('polar',), _lower('_emit_complex', polar=True), None, types.infer_complex_construction),
+    OpRule('affine_quantize', ('affine_quantize',), _lower('_emit_affine', quantize=True), None, compression.infer_affine),
+    OpRule('affine_dequantize', ('affine_dequantize',), _lower('_emit_affine'), None, compression.infer_affine),
+    OpRule('blockwise_shift_scale', ('blockwise_shift_scale',), _lower('_emit_affine', blockwise=True), None, compression.infer_affine),
+    OpRule('lut_to_dense', ('lut_to_dense',), _lower('_emit_lut'), None, compression.infer_lut),
+    OpRule('sparse_to_dense', ('sparse_to_dense',), _lower('_emit_sparse'), None, compression.infer_sparse),
     OpRule('cond', ('cond',), _lower('_emit_cond'), None, control_flow.infer_cond),
     OpRule('while_loop', ('while_loop',), _lower('_emit_while'), None, control_flow.infer_while),
     OpRule('matmul', ('matmul',), _lower('_emit_matmul'), None, types.infer_matmul),

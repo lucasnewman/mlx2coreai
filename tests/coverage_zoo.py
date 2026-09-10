@@ -321,8 +321,10 @@ def _complex_ops(seed: int) -> CoverageModelSpec:
     del seed
     nodes = [Node(op, ('x',), op + '_out') for op in ['real', 'imag', 'conjugate']]
     nodes.append(Node('view', ('x',), 'view_out', attrs={'dtype': 'fp32'}))
+    nodes.extend(Node(op, ('a', 'b'), op + '_out') for op in ['complex', 'polar'])
     return CoverageModelSpec('supplemental_complex_ops', 'Complex components, conjugation and storage views',
-        Graph([TensorSpec('x', (2, 3), 'complex64')], nodes, [node.output for node in nodes]))
+        Graph([TensorSpec('x', (2, 3), 'complex64'), TensorSpec('a', (2, 1), 'fp32'), TensorSpec('b', (1, 3), 'fp32')],
+              nodes, [node.output for node in nodes]))
 
 
 def _data_dependent_ops(seed: int) -> CoverageModelSpec:
@@ -347,7 +349,34 @@ def _control_flow_ops(seed: int) -> CoverageModelSpec:
     return CoverageModelSpec('supplemental_control_flow', 'Explicit conditional and loop subgraphs', graph)
 
 
+def _compression_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    nodes = [
+        Node('constant', (), 'scale', {'value': np.array(0.5, np.float32)}),
+        Node('constant', (), 'offset', {'value': np.array(1, np.int8)}),
+        Node('constant', (), 'bias', {'value': np.array(0, np.float32)}),
+        Node('affine_quantize', ('x', 'scale', 'offset', 'bias'), 'q'),
+        Node('affine_dequantize', ('q', 'scale', 'offset', 'bias'), 'dequantized'),
+        Node('constant', (), 'block_scale', {'value': np.array([[0.5]], np.float32)}),
+        Node('constant', (), 'block_offset', {'value': np.array([[0]], np.int8)}),
+        Node('constant', (), 'block_bias', {'value': np.array([[0]], np.float32)}),
+        Node('blockwise_shift_scale', ('q', 'block_scale', 'block_offset', 'block_bias'), 'blockwise'),
+        Node('constant', (), 'indices', {'value': np.array([[0, 1, 2], [3, 2, 1]], np.uint8), 'dtype': 'uint2'}),
+        Node('constant', (), 'table', {'value': np.arange(4, dtype=np.float32).reshape(1, 1, 4, 1)}),
+        Node('lut_to_dense', ('indices', 'table'), 'palettized'),
+        Node('constant', (), 'mask', {'value': np.array([[0, 1, 0], [1, 0, 0]], np.uint8), 'dtype': 'uint1'}),
+        Node('constant', (), 'nonzero', {'value': np.array([1, 2], np.float32)}),
+        Node('sparse_to_dense', ('nonzero', 'mask'), 'sparse'),
+    ]
+    return CoverageModelSpec('supplemental_compression', 'Affine, blockwise, LUT and sparse compression',
+        Graph([TensorSpec('x', (2, 3), 'fp32')], nodes, ['dequantized', 'blockwise', 'palettized', 'sparse']))
+
+
 _BUILDERS: dict[str, Callable[[int], CoverageModelSpec]] = {
+    "supplemental_adaptive_pooling": lambda seed: CoverageModelSpec('supplemental_adaptive_pooling',
+        'Adaptive average pooling', Graph([TensorSpec('x', (2, 5, 6, 3), 'fp32')],
+            [Node('adaptive_avg_pool', ('x',), 'out', {'output_size': [2, 3]})], ['out'])),
+    "supplemental_compression": _compression_ops,
     "supplemental_control_flow": _control_flow_ops,
     "supplemental_extended_ops": _extended_ops,
     "supplemental_complex_ops": _complex_ops,

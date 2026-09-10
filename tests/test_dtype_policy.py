@@ -41,3 +41,9 @@ def test_scalar_constant_rank(dtype):
     value, _ = constant_array(np.array(1, dtype))
     assert value.shape == ()
     assert value.dtype == dtype
+
+
+@pytest.mark.parametrize('hint', ['int8', 'uint8', 'fp16', 'bf16', 'fp32'])
+def test_explicit_constant_dtype_takes_precedence(hint):
+    value, _ = constant_array([1, 2, 3], hint)
+    assert value.dtype == execution_numpy_dtype(hint)

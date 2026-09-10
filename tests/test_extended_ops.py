@@ -211,11 +211,11 @@ def test_float_arange(tmp_path):
 
 
 def test_unresolved_dynamic_strides_are_rejected(tmp_path):
-    import mlx.nn as nn
-    make = lambda size: {'x': np.zeros((2, size, 4), np.float32)}
-    config = ConversionConfig(capture_shapeless=True, dynamic_axes={'x': [1]}, dynamic_probe_inputs=make(7))
+    import mlx.core as mx
+    make = lambda size: {'x': np.zeros((size,), np.float32)}
+    config = ConversionConfig(capture_shapeless=True, dynamic_axes={'x': [0]}, dynamic_probe_inputs=make(7))
     with pytest.raises(ValueError, match='Dynamic AsStrided'):
-        convert_mlx_to_coreai(lambda x: nn.AvgPool1d(3, stride=1)(x), make(5), config=config,
+        convert_mlx_to_coreai(lambda x: mx.as_strided(x, (x.shape[0] // 2, 2), (2, 1)), make(5), config=config,
                              output_path=tmp_path / 'unresolved.aimodel')
 
 

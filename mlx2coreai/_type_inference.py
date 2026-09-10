@@ -18,6 +18,11 @@ def _promote_dtype(lhs: str | None, rhs: str | None) -> str | None:
     rank = {"bool": 0, "int32": 1, "int64": 2, "fp16": 3, "bf16": 4, "fp32": 5, "fp64": 6, "complex64": 7}
     lhs_n = _normalize_input_dtype(lhs)
     rhs_n = _normalize_input_dtype(rhs)
+    if lhs_n == rhs_n:
+        return lhs_n
+    if lhs_n in {'int8', 'uint8'} or rhs_n in {'int8', 'uint8'}:
+        lhs_n = 'int32' if lhs_n in {'int8', 'uint8'} else lhs_n
+        rhs_n = 'int32' if rhs_n in {'int8', 'uint8'} else rhs_n
     if lhs_n not in rank or rhs_n not in rank:
         return lhs_n if lhs_n == rhs_n else lhs_n
     return lhs_n if rank[lhs_n] >= rank[rhs_n] else rhs_n
@@ -27,9 +32,11 @@ def _infer_const_spec(node: Node) -> InferredTensorSpec:
     if "value" not in node.attrs:
         return InferredTensorSpec(shape=None, dtype=_normalize_input_dtype(str(node.attrs.get("dtype", "fp32"))))
     arr = np.asarray(node.attrs["value"])
+    if node.attrs.get('dtype') is not None:
+        return TensorType(tuple(arr.shape), _normalize_input_dtype(node.attrs['dtype']))
     dtype = str(arr.dtype).lower()
-    if dtype == 'complex64':
-        out_dtype = 'complex64'
+    if dtype in {'complex64', 'int8', 'uint8'}:
+        out_dtype = dtype
     elif "bfloat16" in dtype:
         out_dtype = "bf16"
     elif "float16" in dtype:
@@ -315,6 +322,10 @@ def infer_sort_indices(node, input_specs):
 
 def infer_complex_component(node, input_specs):
     return InferredTensorSpec(shape=input_specs[0].shape, dtype="fp32")
+
+
+def infer_complex_construction(node, input_specs):
+    return TensorType(_infer_broadcast_shape(input_specs[0].shape, input_specs[1].shape), 'complex64')
 
 
 def infer_nonzero(node, input_specs):

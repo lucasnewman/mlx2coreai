@@ -42,3 +42,26 @@ def test_trunc_synthetic(tmp_path):
     np.testing.assert_allclose(result, np.trunc(x), atol=0, rtol=0)
     zeros = np.trunc(x) == 0
     np.testing.assert_array_equal(np.signbit(result[zeros]), np.signbit(np.trunc(x)[zeros]))
+
+
+@pytest.mark.parametrize('op', ['complex', 'polar'])
+@pytest.mark.parametrize('optimize', [False, True])
+def test_complex_construction(tmp_path, op, optimize):
+    graph = Graph([TensorSpec('a', (-1, 1), 'fp32'), TensorSpec('b', (1, 3), 'fp32')],
+                  [Node(op, ('a', 'b'), 'out')], ['out'])
+    lowered = lower_graph_to_coreai(graph, config=ConversionConfig(optimize=optimize))
+    asset = lowered.program.save_asset(tmp_path / 'construct.aimodel')
+    for length in (1, 2, 5):
+        a = np.arange(length, dtype=np.float32).reshape(length, 1) + 0.5
+        b = np.array([[-1, 0, 1.5]], np.float32)
+        expected = a + 1j * b if op == 'complex' else a * np.exp(1j * b)
+        actual = run_aimodel_sync(asset, {'a': a, 'b': b}).outputs['out']
+        np.testing.assert_allclose(actual, expected, atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize('dtype', ['int32', 'complex64'])
+def test_complex_construction_requires_real_inputs(dtype):
+    graph = Graph([TensorSpec('a', (2,), dtype), TensorSpec('b', (2,), 'fp32')],
+                  [Node('complex', ('a', 'b'), 'out')], ['out'])
+    with pytest.raises(ValueError, match='real floating-point'):
+        lower_graph_to_coreai(graph)

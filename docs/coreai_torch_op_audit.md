@@ -26,7 +26,8 @@ runtime comparisons in `tests/test_extended_ops.py`:
   negative-stride slice extents were required in addition to new registrations.
 - Named `gather_mm` composites, including multi-axis and dynamic batch shapes.
 - Complex64 capture, constants, casts, real/imaginary components, conjugation,
-  storage views, absolute value, and arithmetic. This is not blanket coverage
+  storage views, absolute value, arithmetic, and explicit `complex` / `polar`
+  construction with broadcasting. This is not blanket coverage
   of every complex-valued operator, FFT, or complex state buffer.
 - A scoped capture compatibility patch for `mx.bitwise_invert` and `~array`,
   restoring MLX functions even on capture failure. Pre-bound aliases to MLX's
@@ -44,29 +45,63 @@ branches. Branch result types must match, and loops preserve carried tensor
 types. Subgraphs bind inputs positionally and have independent tensor-name
 scopes. This does not capture ordinary Python control flow from MLX.
 
+`tests/test_dynamic_pooling.py` validates dynamic 1D/2D/3D max and average pooling
+using MLX references, including padded, non-overlapping, asymmetric, and unit
+windows. A scoped capture patch expresses MLX sliding windows with relative
+slices and stacks, rather than fitting shape/stride formulas from two probes.
+Explicit `adaptive_avg_pool` IR also supports 1-3 channels-last spatial dimensions
+with runtime-computed boundaries and fixed output sizes (`None` preserves an
+axis). Its small-graph tests use independent NumPy references.
+
 Backend and remaining feature boundaries:
 
 - GatherMM passes on the default backend; CPU-only execution reports an
   inference failure in this SDK. Structured control flow passes CPU-only tests;
   default-backend conditional probes hung or crashed. Do not infer portable
   backend support from asset verification alone.
-- Dynamic batch pooling is covered. Unresolved dynamic spatial window/stride
-  expressions are now rejected rather than silently freezing capture geometry.
-  General symbolic window capture remains work to do.
-- Compression/quantization, packed storage dtypes, and MLX quantized capture
-  are still separate, unimplemented features. The upstream custom-op inventory
-  is a useful starting point, not a drop-in implementation.
+- Dynamic batch and spatial pooling are covered. Arbitrary unresolved dynamic
+  `as_strided` expressions still fail clearly instead of freezing capture
+  geometry; they are not needed for the upstream pooling capability.
+- Explicit compression IR now covers affine quantize/dequantize, blockwise
+  expansion, LUT expansion, and sparse bitmasks, with byte and packed integer
+  storage. See [compression contracts and tests](compression.md). These are not
+  aliases for MLX's packed quantization primitives; automatic MLX quantized-layer
+  capture and float4/float8 storage remain separate features.
 
-The regenerated asset-coverage report has 155 lowering keys / 198 source aliases
-across 31 fixture graphs. Asset verification and numerical runtime tests remain
-separate checks. The follow-up full suite passed with **461 passed / 4 expected
-failures** on the installed runtime. Preserving rank-zero constants also makes the tiny native
+The regenerated asset-coverage report has 163 lowering keys / 206 source aliases
+across 33 fixture graphs. All **49 original audit probes now capture and verify**
+(up from 20). These probe results are in
+`.build/audit_upstream_ops_followup.jsonl`; the original results are unchanged.
+Asset verification and numerical runtime tests remain separate checks.
+The final follow-up suite passed with **574 passed / 4 existing expected
+failures** on MLX 0.32.2 / CoreAI 1.0.0b2. `git diff --check` also passed.
+Preserving rank-zero constants also makes the tiny native
 gated-delta layer parity test pass: repeated runs passed, and restoring the old
 rank-widening behavior reproduced its mismatch. Its expected-failure marker was
 removed. The larger hybrid-model and LFM limitations remain separate.
 Scalar gather lowering keeps a rank-one intermediate to avoid an MPS compiler
 assertion, then restores the declared result shape. The Pocket TTS integration
 suite and standalone scalar-gather GPU tests pass with this workaround.
+
+## Follow-Up Evidence
+
+| Initial gap | Implementation / runtime evidence |
+|---|---|
+| GatherAxis, boolean logic, rounding/sign, transcendental functions | `tests/test_extended_ops.py`, native MLX references |
+| Scans, scatter/indexed updates, sort/partition/top-k | `tests/test_extended_ops.py`, including negative/duplicate indices and partition invariants |
+| Pooling, resizing, reflection padding | `tests/test_extended_ops.py` and `tests/test_dynamic_pooling.py`, including dynamic spatial sizes |
+| GatherMM | `tests/test_extended_ops.py`, static/dynamic batch tests on default backend |
+| Bitwise invert capture and complex tensors | `tests/test_extended_ops.py`; broadcast complex/polar construction in `tests/test_data_dependent_ops.py` |
+| Nonzero, masked scatter, truncation | `tests/test_data_dependent_ops.py`, synthetic IR with empty and data-dependent outputs |
+| Structured conditionals and loops | `tests/test_control_flow.py`, synthetic IR executed CPU-only |
+| Compression custom ops and integer storage | `tests/test_compression.py`, affine/blockwise/LUT/sparse cases and checked sub-byte packing |
+| Adaptive average pooling | `tests/test_dynamic_pooling.py`, static/dynamic synthetic IR with independent references |
+
+This closes the operator-capability gaps identified in the audit using MLX
+capture where available and explicit IR otherwise. It does not claim every
+ATen overload/dtype/backend combination, automatic quantized-model conversion,
+or resolution of existing full-model runtime failures. The initial audit below
+is historical, not the current supported-op list.
 
 ## Initial Audit
 

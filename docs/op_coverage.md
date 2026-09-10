@@ -4,13 +4,13 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 
 ## Summary
 
-- Supported source op names in registry: 198
-- Distinct lowering keys in registry: 155
+- Supported source op names in registry: 206
+- Distinct lowering keys in registry: 163
 - Coverage modules: `tests.model_zoo, tests.coverage_zoo`
-- Coverage graphs: 31
-- Coverage graph nodes: 296
-- Unique source ops exercised: 198
-- Unique lowering keys exercised: 155
+- Coverage graphs: 33
+- Coverage graph nodes: 314
+- Unique source ops exercised: 206
+- Unique lowering keys exercised: 163
 - Asset validation: passed
 
 ## Exercised Ops
@@ -18,8 +18,11 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | Op | Lowering | Nodes | Models |
 | --- | --- | ---: | --- |
 | `abs` | `abs` | 1 | `supplemental_unary_canonical` |
+| `adaptive_avg_pool` | `adaptive_avg_pool` | 1 | `supplemental_adaptive_pooling` |
 | `add` | `add` | 38 | `arithmetic_chain`, `broadcast_tensordot`, `conv_block`, `diagonal_trace`, `linear_relu`, `logical_checks`, `meshgrid_kron`, `numeric_sanity`, `p0_math_pack`, `stats_divmod`, `tri_band` |
 | `addmm` | `addmm` | 2 | `mlp_2layer` |
+| `affine_dequantize` | `affine_dequantize` | 1 | `supplemental_compression` |
+| `affine_quantize` | `affine_quantize` | 1 | `supplemental_compression` |
 | `all` | `all` | 1 | `logical_checks` |
 | `allclose` | `allclose` | 1 | `numeric_sanity` |
 | `any` | `any` | 1 | `logical_checks` |
@@ -44,17 +47,19 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `atleast_2d` | `atleast_2d` | 1 | `shape_helpers` |
 | `atleast_3d` | `atleast_3d` | 1 | `shape_helpers` |
 | `bitwisebinary` | `bitwisebinary` | 1 | `supplemental_aliases_and_bitwise` |
+| `blockwise_shift_scale` | `blockwise_shift_scale` | 1 | `supplemental_compression` |
 | `broadcast` | `broadcast_to` | 1 | `supplemental_constants_identity` |
 | `broadcast_arrays` | `broadcast_arrays` | 2 | `broadcast_tensordot` |
 | `broadcast_axes` | `broadcast_axes` | 1 | `supplemental_shape_index` |
 | `broadcast_to` | `broadcast_to` | 1 | `supplemental_shape_index` |
 | `cast` | `cast` | 13 | `logical_checks`, `numeric_sanity`, `p0_math_pack`, `stats_divmod` |
 | `ceil` | `ceil` | 1 | `supplemental_extended_ops` |
+| `complex` | `complex` | 1 | `supplemental_complex_ops` |
 | `concatenate` | `concat` | 1 | `p0_math_pack` |
 | `cond` | `cond` | 1 | `supplemental_control_flow` |
 | `conjugate` | `conjugate` | 1 | `supplemental_complex_ops` |
 | `const` | `const` | 1 | `supplemental_constants_identity` |
-| `constant` | `const` | 2 | `reduction_suite`, `supplemental_constants_identity` |
+| `constant` | `const` | 12 | `reduction_suite`, `supplemental_compression`, `supplemental_constants_identity` |
 | `contiguous` | `identity` | 1 | `supplemental_constants_identity` |
 | `conv1d` | `conv` | 1 | `supplemental_convolutions` |
 | `conv2d` | `conv` | 1 | `conv_block` |
@@ -123,6 +128,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `logicalnot` | `logical_not` | 1 | `supplemental_extended_ops` |
 | `logicalor` | `logical_or` | 1 | `supplemental_extended_ops` |
 | `logsumexp` | `reduce_log_sum_exp` | 1 | `p0_math_pack` |
+| `lut_to_dense` | `lut_to_dense` | 1 | `supplemental_compression` |
 | `masked_scatter` | `masked_scatter` | 1 | `supplemental_data_dependent_ops` |
 | `matmul` | `matmul` | 1 | `linear_relu` |
 | `max` | `reduce_max` | 1 | `reduction_suite` |
@@ -146,6 +152,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `outer` | `outer` | 1 | `supplemental_linear_misc` |
 | `pad` | `pad` | 1 | `reduction_suite` |
 | `partition` | `sort` | 1 | `supplemental_extended_ops` |
+| `polar` | `polar` | 1 | `supplemental_complex_ops` |
 | `pow` | `pow` | 1 | `supplemental_binary_canonical` |
 | `power` | `pow` | 1 | `arithmetic_chain` |
 | `prod` | `reduce_prod` | 1 | `reduction_suite` |
@@ -185,6 +192,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `sliceupdate` | `slice_update` | 1 | `supplemental_aliases_and_bitwise` |
 | `softmax` | `softmax` | 1 | `supplemental_nn_composites` |
 | `sort` | `sort` | 1 | `supplemental_extended_ops` |
+| `sparse_to_dense` | `sparse_to_dense` | 1 | `supplemental_compression` |
 | `split` | `split` | 1 | `supplemental_shape_index` |
 | `sqrt` | `sqrt` | 1 | `supplemental_unary_canonical` |
 | `square` | `square` | 1 | `supplemental_unary_canonical` |
@@ -236,9 +244,11 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `tests.model_zoo` | `shape_helpers` | 5 | 5 | passed |
 | `tests.model_zoo` | `stats_divmod` | 13 | 6 | passed |
 | `tests.model_zoo` | `tri_band` | 14 | 5 | passed |
+| `tests.coverage_zoo` | `supplemental_adaptive_pooling` | 1 | 1 | passed |
 | `tests.coverage_zoo` | `supplemental_aliases_and_bitwise` | 9 | 9 | passed |
 | `tests.coverage_zoo` | `supplemental_binary_canonical` | 12 | 12 | passed |
-| `tests.coverage_zoo` | `supplemental_complex_ops` | 4 | 4 | passed |
+| `tests.coverage_zoo` | `supplemental_complex_ops` | 6 | 6 | passed |
+| `tests.coverage_zoo` | `supplemental_compression` | 15 | 6 | passed |
 | `tests.coverage_zoo` | `supplemental_constants_identity` | 5 | 5 | passed |
 | `tests.coverage_zoo` | `supplemental_control_flow` | 2 | 2 | passed |
 | `tests.coverage_zoo` | `supplemental_convolutions` | 5 | 5 | passed |
