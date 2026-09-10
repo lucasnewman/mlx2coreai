@@ -971,7 +971,8 @@ class CoreAILowerer:
             if all(int(dim) >= 0 for dim in value.type.shape):
                 return coreai.reshape(value, [math.prod(value.type.shape[:-2]), *value.type.shape[-2:]])
             return _reshape_with_mixed_shape(value, [-1,
-                _dim_1d_from_value(value, -2), _dim_1d_from_value(value, -1)])
+                *[int(value.type.shape[axis]) if int(value.type.shape[axis]) >= 0
+                  else _dim_1d_from_value(value, axis) for axis in (-2, -1)]])
         lhs, rhs = flatten_batch(lhs), flatten_batch(rhs)
         lhs_indices, rhs_indices = coreai.cast(lhs_indices, np.uint32), coreai.cast(rhs_indices, np.uint32)
         def body(args):

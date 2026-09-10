@@ -47,3 +47,25 @@ def test_scalar_constant_rank(dtype):
 def test_explicit_constant_dtype_takes_precedence(hint):
     value, _ = constant_array([1, 2, 3], hint)
     assert value.dtype == execution_numpy_dtype(hint)
+
+
+def test_model_cast_predicate_uses_parameter_paths():
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx2coreai.dtypes import cast_model_precision
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = mx.ones((2, 3), mx.float32)
+            self.expert_bias = mx.zeros(2, mx.float32)
+            self.indices = mx.arange(2)
+
+        def cast_predicate(self, path):
+            return 'expert_bias' not in path
+
+    model = Model()
+    cast_model_precision(model, 'bf16')
+    assert model.weight.dtype == mx.bfloat16
+    assert model.expert_bias.dtype == mx.float32
+    assert model.indices.dtype == mx.int32

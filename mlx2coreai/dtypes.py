@@ -165,7 +165,12 @@ def cast_model_precision(model: Any, compute_precision: str) -> None:
     }[compute_precision]
     predicate = getattr(model, "cast_predicate", None)
     if predicate is not None:
-        set_dtype(dtype, predicate=predicate)
+        # MLX-LM's predicate takes a parameter path, unlike Module.set_dtype's
+        # dtype predicate. Keep excluded router biases in their source dtype.
+        from mlx.utils import tree_flatten, tree_unflatten
+        updates = [(name, value.astype(dtype)) for name, value in tree_flatten(model.parameters())
+                   if predicate(name) and mx.issubdtype(value.dtype, mx.floating)]
+        model.update(tree_unflatten(updates))
     else:
         set_dtype(dtype)
     # Do not capture lazy parameter casts on the first shape but materialized

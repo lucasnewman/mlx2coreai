@@ -25,6 +25,10 @@ Default sources are `mlx-community/Qwen3-0.6B-bf16`, `Qwen/Qwen3.5-0.8B`, and
 0.8B. Supply an optional positional source path or Hub ID to `convert`, and
 `--revision` to pin a Hub revision. No new quantization is applied.
 
+The LFM recipe also accepts `LiquidAI/LFM2-8B-A1B` through MLX-LM's `lfm2_moe`
+implementation. See [MoE conversion notes](lfm2_moe_conversion.md) for the
+expert-dispatch adaptation, memory requirements, and validation status.
+
 Qwen3 and LFM default to FP32; Qwen3.5 defaults to source precision (`auto`,
 BF16 for this checkpoint), retaining FP32 recurrent state. Override with
 `--compute-precision` and `--cache-dtype` only when intentionally testing other

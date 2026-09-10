@@ -240,7 +240,7 @@ def test_partition_contract(tmp_path, op):
         assert np.all(result[..., 3:] >= result[..., 2:3])
 
 
-@pytest.mark.parametrize('kind', ['scan', 'sort', 'gather', 'scatter', 'pool_batch', 'gather_mm'])
+@pytest.mark.parametrize('kind', ['scan', 'sort', 'gather', 'scatter', 'pool_batch', 'gather_mm', 'gather_mm_singleton'])
 def test_dynamic_extended_ops(tmp_path, kind):
     import mlx.core as mx
     import mlx.nn as nn
@@ -253,6 +253,11 @@ def test_dynamic_extended_ops(tmp_path, kind):
         fn = lambda x: mx.gather_mm(x, mx.ones((3, 4, 2)), rhs_indices=mx.zeros((x.shape[0],), mx.int32))
         make = lambda length: {'x': np.arange(length * 2 * 4, dtype=np.float32).reshape(length, 2, 4)}
         axes = {'x': [0]}
+    elif kind == 'gather_mm_singleton':
+        fn = lambda x: mx.gather_mm(x, mx.ones((3, 4, 2)),
+            rhs_indices=mx.zeros((1, x.shape[1], 2), mx.int32)).squeeze(-2)
+        make = lambda length: {'x': np.arange(length * 4, dtype=np.float32).reshape(1, length, 1, 1, 4)}
+        axes = {'x': [1]}
     else:
         make = lambda length: {'x': np.arange(2 * length * 4, dtype=np.float32).reshape(2, length, 4)}
         axes = {'x': [1]}
@@ -268,7 +273,7 @@ def test_dynamic_extended_ops(tmp_path, kind):
         inputs = make(length)
         expected = np.asarray(fn(**{name: mx.array(value) for name, value in inputs.items()}))
         result = next(iter(run_aimodel_sync(converted.asset, inputs,
-            specialization_options=None if kind == 'gather_mm' else SpecializationOptions.cpu_only()).outputs.values()))
+            specialization_options=None if kind.startswith('gather_mm') else SpecializationOptions.cpu_only()).outputs.values()))
         np.testing.assert_allclose(result, expected, atol=2e-5, rtol=2e-5)
 
 

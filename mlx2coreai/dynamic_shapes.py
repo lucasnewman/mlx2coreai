@@ -133,6 +133,8 @@ def dynamicize_graph_from_probe(
             # input dimensions. Never freeze a varying value that probing could
             # not represent, since that would silently read the wrong elements.
             _require_dynamic_attr_resolution(node.attrs, probe_node.attrs, attrs)
+        if coreai_op_for_mlx(node.op) == "arange":
+            _require_dynamic_attr_resolution(node.attrs, probe_node.attrs, attrs, operation="Arange")
         shape, probe_shape = node.attrs.get("shape"), probe_node.attrs.get("shape")
         if isinstance(shape, (list, tuple)) and isinstance(probe_shape, (list, tuple)):
             attrs["shape"] = _dynamicize_attr_value(shape, probe_shape, shape_candidates)
@@ -197,18 +199,18 @@ def _validate_probe_compatibility(graph: Graph, probe_graph: Graph) -> None:
             )
 
 
-def _require_dynamic_attr_resolution(base, probe, resolved):
+def _require_dynamic_attr_resolution(base, probe, resolved, *, operation="AsStrided"):
     if is_dynamic_dim_ref(resolved):
         return
     if isinstance(base, dict):
         for key in base:
-            _require_dynamic_attr_resolution(base[key], probe[key], resolved[key])
+            _require_dynamic_attr_resolution(base[key], probe[key], resolved[key], operation=operation)
     elif isinstance(base, (list, tuple)):
         for before, after, value in zip(base, probe, resolved, strict=True):
-            _require_dynamic_attr_resolution(before, after, value)
+            _require_dynamic_attr_resolution(before, after, value, operation=operation)
     elif base != probe:
-        raise ValueError('Dynamic AsStrided shape/stride expression could not be resolved from the probe; '
-                         'use an explicit symbolic shape or a window-operation adapter rather than fixed capture dimensions.')
+        raise ValueError(f'Dynamic {operation} expression could not be resolved from the probe; '
+                         'expose the derived extent as a tensor dimension rather than fixing capture dimensions.')
 
 
 def _dynamicize_attr_value(value: Any, probe_value: Any, candidates: list[tuple[Any, Any, dict[str, Any]]]) -> Any:

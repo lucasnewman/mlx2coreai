@@ -60,6 +60,7 @@ def build_model(source, *, recipe, adapter, revision=None, compute_precision="fp
     vocab = getattr(getattr(model, "args", None), "vocab_size", getattr(tokenizer, "vocab_size", None))
     return Build(recipe, {"main": component}, resources, {
         "source": str(Path(source).resolve()) if Path(source).is_dir() else str(source), "revision": revision,
+        "model_type": getattr(getattr(model, "args", None), "model_type", None),
         "compute_precision": precision, "source_precision_policy": compute_precision, "cache_dtype": cache_dtype,
         "max_context_length": max_context_length, "dynamic_sequence": True, "dynamic_state": True,
         "batch_size": 1, "vocab_size": vocab, "eos_token_ids": eos,
