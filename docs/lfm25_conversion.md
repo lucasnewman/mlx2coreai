@@ -5,6 +5,12 @@ The model-local build/run interface now lives in `recipes.lfm2`; see
 and packages its tokenizer with a dynamic stateful decoder. The original
 commands below remain compatible.
 
+The recipe migration exposed intermittent full-model parity failures with the
+current capture/optimizer/runtime path. Materializing history updates with
+gathers before packing passed one run but failed a repeat; it is an unvalidated
+experiment, not a confirmed fix. The legacy converter currently uses the same
+adapter. See the [recipe validation results](lm_recipes.md#checkpoint-verification).
+
 ## Model and State
 
 The installed `mlx-lm` supports LFM2.5 through `mlx_lm.models.lfm2`; `mlx-vlm`

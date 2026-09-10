@@ -148,6 +148,7 @@ def decode_gather(op, arguments, output_shape, output_dtype):
         axes = _int_list(arguments[0])
         if axes:
             attrs["axis"] = int(axes[0])
+            attrs["axes"] = axes
         if len(arguments) >= 2:
             slice_shape = _int_list(arguments[1])
             if slice_shape is not None:
@@ -159,9 +160,31 @@ def decode_gather(op, arguments, output_shape, output_dtype):
 
 def decode_gather_along_axis(op, arguments, output_shape, output_dtype):
     attrs: dict[str, Any] = {}
-    if op in {"take", "take_along_axis"} and arguments:
+    if arguments:
         attrs["axis"] = int(arguments[0])
     return attrs
+
+
+def decode_scan(op, arguments, output_shape, output_dtype):
+    mode, axis, reverse, inclusive = arguments
+    return {"mode": int(mode), "axis": int(axis), "reverse": bool(reverse), "inclusive": bool(inclusive)}
+
+
+def decode_sort(op, arguments, output_shape, output_dtype):
+    return {"axis": int(arguments[-1]), **({"kth": int(arguments[0])} if len(arguments) == 2 else {})}
+
+
+def decode_scatter(op, arguments, output_shape, output_dtype):
+    if op == 'scatteraxis':
+        mode, axis = arguments
+        return {"axis": int(axis), "mode": {0: 'add', 1: 'update'}[int(mode)]}
+    mode, axes = arguments
+    return {"axes": list(axes), "mode": {0: 'max', 1: 'min', 2: 'add', 3: 'mul', 4: 'update'}[int(mode)]}
+
+
+def decode_as_strided(op, arguments, output_shape, output_dtype):
+    shape, strides, offset = arguments
+    return {"shape": list(shape), "strides": list(strides), "offset": int(offset)}
 
 
 def decode_squeeze(op, arguments, output_shape, output_dtype):
@@ -176,9 +199,9 @@ def decode_squeeze(op, arguments, output_shape, output_dtype):
 def decode_arange(op, arguments, output_shape, output_dtype):
     attrs: dict[str, Any] = {}
     if op == "arange" and len(arguments) >= 3:
-        attrs["start"] = int(arguments[0])
-        attrs["end"] = int(arguments[1])
-        attrs["step"] = int(arguments[2])
+        for key, value in zip(("start", "end", "step"), arguments[:3], strict=True):
+            attrs[key] = int(value) if float(value).is_integer() else float(value)
+        attrs["dtype"] = output_dtype or "int32"
     return attrs
 
 
@@ -284,7 +307,7 @@ def decode_layernorm(op, arguments, output_shape, output_dtype):
 
 def decode_cast(op, arguments, output_shape, output_dtype):
     attrs: dict[str, Any] = {}
-    if op in {"astype", "cast"} and output_dtype is not None:
+    if op in {"astype", "cast", "view"} and output_dtype is not None:
         attrs["dtype"] = output_dtype
     return attrs
 

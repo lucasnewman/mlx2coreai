@@ -15,7 +15,7 @@ def _promote_dtype(lhs: str | None, rhs: str | None) -> str | None:
         return rhs
     if rhs is None:
         return lhs
-    rank = {"bool": 0, "int32": 1, "int64": 2, "fp16": 3, "bf16": 4, "fp32": 5, "fp64": 6}
+    rank = {"bool": 0, "int32": 1, "int64": 2, "fp16": 3, "bf16": 4, "fp32": 5, "fp64": 6, "complex64": 7}
     lhs_n = _normalize_input_dtype(lhs)
     rhs_n = _normalize_input_dtype(rhs)
     if lhs_n not in rank or rhs_n not in rank:
@@ -28,7 +28,9 @@ def _infer_const_spec(node: Node) -> InferredTensorSpec:
         return InferredTensorSpec(shape=None, dtype=_normalize_input_dtype(str(node.attrs.get("dtype", "fp32"))))
     arr = np.asarray(node.attrs["value"])
     dtype = str(arr.dtype).lower()
-    if "bfloat16" in dtype:
+    if dtype == 'complex64':
+        out_dtype = 'complex64'
+    elif "bfloat16" in dtype:
         out_dtype = "bf16"
     elif "float16" in dtype:
         out_dtype = "fp16"
@@ -305,6 +307,19 @@ def infer_gated_delta_update(node, input_specs):
     if int(node.attrs.get("output_index", 0)) == 1:
         return input_specs[5]
     return InferredTensorSpec(shape=input_specs[2].shape, dtype=input_specs[0].dtype)
+
+
+def infer_sort_indices(node, input_specs):
+    return InferredTensorSpec(shape=input_specs[0].shape, dtype="int32")
+
+
+def infer_complex_component(node, input_specs):
+    return InferredTensorSpec(shape=input_specs[0].shape, dtype="fp32")
+
+
+def infer_nonzero(node, input_specs):
+    shape = input_specs[0].shape
+    return InferredTensorSpec(shape=(-1, len(shape)) if shape is not None else None, dtype='int32')
 
 
 def infer_scaled_dot_product_attention(node, input_specs):
@@ -619,15 +634,16 @@ def infer_number_of_elements(node, input_specs):
 
 
 def infer_arange(node, input_specs):
+    dtype = node.attrs.get('dtype', 'int32')
     start = float(node.attrs.get("start", 0))
     end = node.attrs.get("end")
     step = float(node.attrs.get("step", 1))
     if end is None or step == 0:
-        return InferredTensorSpec(shape=None, dtype="int32")
+        return InferredTensorSpec(shape=None, dtype=dtype)
     if is_dynamic_dim_ref(end):
-        return InferredTensorSpec(shape=(-1,), dtype="int32")
+        return InferredTensorSpec(shape=(-1,), dtype=dtype)
     n = max(0, int(math.ceil((float(end) - start) / step)))
-    return InferredTensorSpec(shape=(n,), dtype="int32")
+    return InferredTensorSpec(shape=(n,), dtype=dtype)
 
 
 def infer_linspace(node, input_specs):

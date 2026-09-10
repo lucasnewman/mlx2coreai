@@ -22,6 +22,7 @@ _DTYPE_ALIASES = {
     "long": "int64",
     "int64": "int64",
     "bool": "bool",
+    "complex64": "complex64",
 }
 
 
@@ -41,6 +42,8 @@ def execution_numpy_dtype(dtype: str) -> Any:
         return np.int32
     if dtype == "bool":
         return np.bool_
+    if dtype == "complex64":
+        return np.complex64
     raise ValueError(f"Unsupported dtype for constant: {dtype}")
 
 
@@ -62,7 +65,8 @@ def constant_array(value: Any, dtype_hint: str | None = None) -> tuple[np.ndarra
         arr = arr.astype(ml_dtypes.bfloat16)
     elif dtype_hint is not None:
         arr = arr.astype(execution_numpy_dtype(dtype_hint))
-    return np.ascontiguousarray(arr), downcast
+    # ascontiguousarray promotes scalar tensors to rank one.
+    return np.ascontiguousarray(arr).reshape(arr.shape), downcast
 
 
 def capture_numpy_dtype(dtype: np.dtype) -> str:
@@ -79,6 +83,8 @@ def capture_numpy_dtype(dtype: np.dtype) -> str:
         return "int64"
     if dtype == np.bool_:
         return "bool"
+    if dtype == np.complex64:
+        return "complex64"
     if np.issubdtype(dtype, np.floating):
         if dtype.itemsize <= np.dtype(np.float16).itemsize:
             return "fp16"
@@ -98,6 +104,8 @@ def capture_mlx_dtype(dtype: Any) -> str:
     if isinstance(dtype, np.dtype):
         return capture_numpy_dtype(dtype)
     text = str(dtype).strip().lower()
+    if text.endswith('complex64'):
+        return 'complex64'
     if "bfloat16" in text or text.endswith("bf16"):
         return "bf16"
     if text.endswith("float16") or text.endswith("fp16"):

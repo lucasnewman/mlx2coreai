@@ -75,6 +75,11 @@ interrupted previous request. Requests within a session must be serial.
 
 The shared cache adapter retains the per-layer gather/select workaround and
 final packing. Model-local adapters select which layers consume each state.
+LFM additionally materializes each convolution-history update with a gather
+before packing as an experiment targeting possible slice-view / fixed-reshape
+aliasing. Repeat validation still fails; this is not a confirmed fix.
+The adapter lives in `recipes/lfm2/adapter.py`;
+the legacy converter selects the same adapter through recipe-local policy.
 Normal generation does not read KV/conv/recurrent buffers back to the CPU.
 
 ## Validation and Limits
@@ -95,6 +100,10 @@ agreement. `--source` can override a moved validation checkpoint.
 
 Validation timings include reference execution and state readbacks; they are
 not inference benchmarks. Omit `--validate-mlx` for normal generation.
+
+Do not disable authoring optimization on mutable-state components in this SDK:
+that pass also promotes buffer arguments to runtime state. Recipe export rejects
+such configurations instead of publishing a bundle with missing state.
 
 Qwen3.5 is still **experimental**, regardless of precision. Its known native
 gated-delta corruption and decomposed-loop compiler failure are not solved by
@@ -120,6 +129,16 @@ Qwen3-0.6B FP32 passes 35 calls (3/5/remainder prefill, then 32 advancing decode
 steps) at capacity 2048, beyond the capture capacity of 256. All 35 greedy-token
 comparisons match MLX. Maximum absolute errors are 1.241e-4 for logits,
 8.240e-4 for keys, and 7.877e-4 for values; unused KV tails remain zero.
+
+LFM2.5-2.6B FP32 with recipe-local gather materialization passed one 35-call
+comparison at capacity 2048 with matching greedy tokens, but the process later
+reported a disk-space error. A repeat failed at position 8 with maximum absolute
+logit error 5.082. Full-model recipe parity is therefore unresolved; the saved
+successful validation report must not be treated as reproducible verification.
+The initial slice-view packing export failed during decode, and switching buffer
+backing did not fix it. The old validated asset passed the same request and
+observer once. Graph comparison identified a packing difference worth testing,
+but has not established a root cause.
 
 The full Qwen3.5-0.8B BF16 checkpoint exports and verifies as an optimized
 2,916-node component with two dynamic KV states, BF16 convolution state, and

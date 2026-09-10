@@ -1,9 +1,19 @@
 """LFM2/2.5's short-convolution state layout and precision restrictions."""
 import warnings
 
-from recipes._mlx_lm.stateful import _layers, attention_layout
+from recipes._mlx_lm.stateful import _ExportableRecurrentCache, _layers, attention_layout
 
-WORKAROUNDS = ["FP32 is the correctness baseline; reduced precision is experimental"]
+WORKAROUNDS = ["FP32 is the correctness baseline; reduced precision is experimental",
+               "Materialize convolution-history updates with gathers before packing state"]
+
+
+class ArrayCache(_ExportableRecurrentCache):
+    def __setitem__(self, index, value):
+        import mlx.core as mx
+
+        # Avoid a slice-view/reshape chain aliasing the live history buffer in
+        # the beta runtime. The history length is fixed by the convolution.
+        self.state[index] = mx.take(value, mx.arange(value.shape[1]), axis=1)
 
 
 def experimental(precision, cache_dtype=None):

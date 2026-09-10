@@ -116,6 +116,11 @@ capture/probe inputs, including zero state with different capacities. Those
 functions should not hardcode trace lengths into the adapted forward pass.
 Adapters still need independent native-model parity tests.
 
+Mutable-state components currently require optimization: the beta optimizer
+also promotes annotated buffers to runtime state. Export rejects disabled or
+skipped optimization for these components rather than publishing an invalid
+state contract. This does not affect stateless recipes such as Mimi.
+
 `export(build, path, only=[...])` supports partial component builds when the
 recipe metadata/resource names are unchanged. Changes to the source/precision/
 partitioning contract require a full rebuild. Selected conversions are staged

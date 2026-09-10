@@ -41,9 +41,14 @@ def dimension_sources(value: Any):
 
 
 def _json_attr_value(value: Any) -> Any:
+    if isinstance(value, Graph):
+        return value.to_dict()
     if isinstance(value, np.ndarray):
         # Keep small constants readable; summarize large arrays to avoid massive JSON artifacts.
         if value.size <= 128:
+            if np.iscomplexobj(value):
+                return {"__ndarray__": True, "dtype": str(value.dtype), "shape": list(value.shape),
+                        "real": value.real.tolist(), "imag": value.imag.tolist()}
             return value.tolist()
         return {
             "__ndarray__": True,
@@ -52,6 +57,8 @@ def _json_attr_value(value: Any) -> Any:
             "numel": int(value.size),
         }
     if isinstance(value, np.generic):
+        if np.iscomplexobj(value):
+            return {"real": float(value.real), "imag": float(value.imag)}
         return value.item()
     if isinstance(value, dict):
         return {str(k): _json_attr_value(v) for k, v in value.items()}

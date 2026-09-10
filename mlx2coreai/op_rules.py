@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Callable
 from . import _op_attrs as attrs, _type_inference as types
+from . import _elementwise as elementwise
+from . import _control_flow as control_flow
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,8 @@ def less_equal(lhs, rhs):
 
 
 _RULES = (
+    OpRule('cond', ('cond',), _lower('_emit_cond'), None, control_flow.infer_cond),
+    OpRule('while_loop', ('while_loop',), _lower('_emit_while'), None, control_flow.infer_while),
     OpRule('matmul', ('matmul',), _lower('_emit_matmul'), None, types.infer_matmul),
     OpRule('add', ('add',), _lower('_emit_binary', fn=coreai.broadcasting_add), None, types.infer_binary),
     OpRule('maximum', ('maximum',), _lower('_emit_binary', fn=coreai.broadcasting_maximum), None, types.infer_binary),
@@ -64,7 +68,30 @@ _RULES = (
     OpRule('slice_update', ('slice_update', 'sliceupdate'), _lower('_lower_slice_update'), attrs.decode_slice, None),
     OpRule('dynamic_slice_update', ('dynamic_slice_update', 'dynamicsliceupdate'), _lower('_lower_dynamic_slice_update'), attrs.decode_dynamic_slice_update, None),
     OpRule('gather', ('take', 'gather'), _lower('_lower_gather'), attrs.decode_gather, types.infer_gather),
-    OpRule('gather_along_axis', ('take_along_axis',), _lower('_emit_gather_along_axis'), attrs.decode_gather_along_axis, types.infer_gather_along_axis),
+    OpRule('gather_along_axis', ('take_along_axis', 'gatheraxis'), _lower('_emit_gather_along_axis'), attrs.decode_gather_along_axis, types.infer_gather_along_axis),
+    OpRule('logical_and', ('logicaland', 'logical_and'), _lower('_emit_binary', fn=coreai.broadcasting_and), None, types.infer_comparison),
+    OpRule('logical_or', ('logicalor', 'logical_or'), _lower('_emit_binary', fn=coreai.broadcasting_or), None, types.infer_comparison),
+    OpRule('logical_not', ('logicalnot', 'logical_not'), _lower('_emit_unary', fn=coreai.not_), None, types.infer_elementwise_bool),
+    OpRule('floor', ('floor',), _lower('_emit_unary', fn=elementwise.floor), None, types.infer_passthrough),
+    OpRule('ceil', ('ceil',), _lower('_emit_unary', fn=elementwise.ceil), None, types.infer_passthrough),
+    OpRule('round', ('round',), _lower('_emit_unary', fn=elementwise.round_), None, types.infer_passthrough),
+    OpRule('sign', ('sign',), _lower('_emit_unary', fn=elementwise.sign), None, types.infer_passthrough),
+    OpRule('trunc', ('trunc',), _lower('_emit_unary', fn=elementwise.trunc), None, types.infer_passthrough),
+    OpRule('acosh', ('arccosh',), _lower('_emit_unary', fn=coreai.acosh), None, types.infer_passthrough),
+    OpRule('asinh', ('arcsinh',), _lower('_emit_unary', fn=coreai.asinh), None, types.infer_passthrough),
+    OpRule('cosh', ('cosh',), _lower('_emit_unary', fn=coreai.cosh), None, types.infer_passthrough),
+    OpRule('sinh', ('sinh',), _lower('_emit_unary', fn=coreai.sinh), None, types.infer_passthrough),
+    OpRule('tan', ('tan',), _lower('_emit_unary', fn=coreai.tan), None, types.infer_passthrough),
+    OpRule('atan2', ('arctan2',), _lower('_emit_binary', fn=elementwise.atan2), None, types.infer_binary),
+    OpRule('scan', ('scan',), _lower('_emit_scan'), attrs.decode_scan, types.infer_passthrough),
+    OpRule('sort', ('sort', 'partition'), _lower('_emit_sort', indices=False), attrs.decode_sort, types.infer_passthrough),
+    OpRule('argsort', ('argsort', 'argpartition'), _lower('_emit_sort', indices=True), attrs.decode_sort, types.infer_sort_indices),
+    OpRule('scatter', ('scatter',), _lower('_emit_scatter'), attrs.decode_scatter, types.infer_passthrough),
+    OpRule('scatter_axis', ('scatteraxis',), _lower('_emit_scatter_axis'), attrs.decode_scatter, types.infer_passthrough),
+    OpRule('gather_mm', ('gathermm', 'gather_mm'), _lower('_emit_gather_mm'), None, None),
+    OpRule('as_strided', ('asstrided', 'as_strided'), _lower('_emit_as_strided'), attrs.decode_as_strided, types.infer_reshape),
+    OpRule('nonzero', ('nonzero',), _lower('_emit_nonzero'), None, types.infer_nonzero),
+    OpRule('masked_scatter', ('masked_scatter',), _lower('_emit_masked_scatter'), None, types.infer_passthrough),
     OpRule('squeeze', ('squeeze',), _lower('_emit_squeeze'), attrs.decode_squeeze, None),
     OpRule('zeros', ('zeros',), _lower('_emit_fill', op='zeros'), None, types.infer_fill),
     OpRule('ones', ('ones',), _lower('_emit_fill', op='ones'), None, types.infer_fill),
@@ -86,7 +113,7 @@ _RULES = (
     OpRule('sqrt', ('sqrt',), _lower('_emit_sqrt'), attrs.decode_sqrt, types.infer_passthrough),
     OpRule('square', ('square',), _lower('_emit_unary', fn=lambda x: coreai.broadcasting_mul(x, x)), None, types.infer_passthrough),
     OpRule('rsqrt', ('rsqrt',), _lower('_emit_unary', fn=coreai.rsqrt), None, types.infer_passthrough),
-    OpRule('abs', ('abs',), _lower('_emit_unary', fn=coreai.abs_), None, types.infer_passthrough),
+    OpRule('abs', ('abs',), _lower('_emit_unary', fn=elementwise.abs_), None, types.infer_passthrough),
     OpRule('split', ('split',), _lower('_lower_split'), attrs.decode_split, types.infer_split),
     OpRule('expand_dims', ('expanddims', 'expand_dims'), _lower('_lower_expand', 'expand_dims'), attrs.decode_expand_dims, types.infer_expand_dims),
     OpRule('bitwisebinary', ('bitwisebinary',), _lower('_lower_bitwise_binary'), attrs.decode_bitwisebinary, types.infer_bitwisebinary),
@@ -104,6 +131,10 @@ _RULES = (
     OpRule('layernorm', ('layernorm',), _lower('_lower_layernorm'), attrs.decode_layernorm, types.infer_passthrough),
     OpRule('rmsnorm', ('rmsnorm',), _lower('_lower_rmsnorm'), attrs.decode_rmsnorm, types.infer_passthrough),
     OpRule('cast', ('astype', 'cast'), _lower('_emit_cast'), attrs.decode_cast, types.infer_cast),
+    OpRule('real', ('real',), _lower('_emit_unary', fn=coreai.real_part), None, types.infer_complex_component),
+    OpRule('imag', ('imag',), _lower('_emit_unary', fn=coreai.imaginary_part), None, types.infer_complex_component),
+    OpRule('conjugate', ('conjugate',), _lower('_emit_conjugate'), None, types.infer_passthrough),
+    OpRule('view', ('view',), _lower('_emit_view'), attrs.decode_cast, None),
     OpRule('number_of_elements', ('number_of_elements',), _lower('_emit_number_of_elements'), attrs.decode_number_of_elements, types.infer_number_of_elements),
     OpRule('identity', ('stop_gradient', 'copy', 'contiguous'), _lower('_emit_identity'), None, types.infer_passthrough),
     OpRule('addmm', ('addmm',), _lower('_emit_addmm'), attrs.decode_addmm, None),

@@ -31,8 +31,7 @@ def test_cli_forwards_gated_delta_implementation(monkeypatch, tmp_path, implemen
 
 
 @pytest.mark.parametrize("implementation", [
-    pytest.param("native", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-        reason="macOS 27 26A428 native gated_delta_update corrupts integrated per-token output")),
+    "native",
     "decomposed",
 ])
 def test_live_gated_delta_net(tmp_path, monkeypatch, implementation):

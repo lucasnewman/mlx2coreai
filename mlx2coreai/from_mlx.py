@@ -7,6 +7,7 @@ import numpy as np
 from .dtypes import capture_mlx_dtype as _mlx_dtype_to_ir, capture_numpy_dtype as _numpy_dtype_to_ir
 from .ir import Graph, Node, TensorSpec, TensorType
 from .op_registry import decode_primitive_arguments, normalize_mlx_op_name
+from ._capture_compat import export_compatibility
 from ._capture_utils import (
     _shape_tuple, _constant_to_numpy, _normalize_numpy_inputs,
     _default_input_specs, _normalize_outputs,
@@ -243,14 +244,8 @@ def _capture_graph_from_mlx_function_callback(
     def _callback(payload: dict[str, Any]) -> None:
         events.append(payload)
 
-    # MLX 0.32.2 cannot serialize Contiguous. It is only a layout hint; CoreAI
-    # chooses its own layouts. Keep the original operation for reference execution.
-    original_contiguous = mx.contiguous
-    try:
-        mx.contiguous = lambda value, *args, **kwargs: value
+    with export_compatibility(mx):
         mx.export_function(_callback, function, shapeless=bool(shapeless), **mx_inputs)
-    finally:
-        mx.contiguous = original_contiguous
     parser_specs = input_specs if input_specs is not None else _default_input_specs(numpy_inputs)
     graph = parse_mlx_export_events_to_graph(
         events,

@@ -161,3 +161,21 @@ def test_cli_experimental_guard_precedes_loading(monkeypatch):
     # reached before the experimental opt-in is checked.
     with pytest.raises(ValueError, match="allow-experimental"):
         asyncio.run(cli.generate(qwen35, SimpleNamespace(bundle="unused", allow_experimental=False)))
+
+
+def test_lfm_history_update_materializes_a_gather():
+    import mlx.core as mx
+    from mlx2coreai import capture_mlx_graph
+
+    def forward(x, history):
+        cache = lfm2.adapter.ArrayCache(history)
+        cache[0] = mx.concatenate([cache[0], x], axis=1)[:, -2:, :]
+        return cache[0]
+
+    for length in (1, 3):
+        x = np.arange(length * 4, dtype=np.float32).reshape(1, length, 4)
+        history = np.full((1, 2, 4), -1, np.float32)
+        captured = capture_mlx_graph(forward, {"x": x, "history": history}, capture_shapeless=True)
+        assert any(node.op == "gather" for node in captured.graph.nodes)
+        np.testing.assert_array_equal(next(iter(captured.expected_outputs.values())),
+                                      np.concatenate([history, x], axis=1)[:, -2:])

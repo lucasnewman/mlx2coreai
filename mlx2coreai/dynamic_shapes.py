@@ -128,6 +128,11 @@ def dynamicize_graph_from_probe(
                 tuple(a if a == b else -1 for a, b in zip(base.shape, probe.shape, strict=True)), base.dtype,
             )
         attrs = _dynamicize_attr_value(node.attrs, probe_node.attrs, shape_candidates)
+        if coreai_op_for_mlx(node.op) == "as_strided":
+            # Strides and window sizes can be products or affine expressions of
+            # input dimensions. Never freeze a varying value that probing could
+            # not represent, since that would silently read the wrong elements.
+            _require_dynamic_attr_resolution(node.attrs, probe_node.attrs, attrs)
         shape, probe_shape = node.attrs.get("shape"), probe_node.attrs.get("shape")
         if isinstance(shape, (list, tuple)) and isinstance(probe_shape, (list, tuple)):
             attrs["shape"] = _dynamicize_attr_value(shape, probe_shape, shape_candidates)
@@ -190,6 +195,20 @@ def _validate_probe_compatibility(graph: Graph, probe_graph: Graph) -> None:
                 "dynamic shape probe produced a different graph structure at "
                 f"node {index}: {node.op}/{len(node.inputs)} vs {probe_node.op}/{len(probe_node.inputs)}."
             )
+
+
+def _require_dynamic_attr_resolution(base, probe, resolved):
+    if is_dynamic_dim_ref(resolved):
+        return
+    if isinstance(base, dict):
+        for key in base:
+            _require_dynamic_attr_resolution(base[key], probe[key], resolved[key])
+    elif isinstance(base, (list, tuple)):
+        for before, after, value in zip(base, probe, resolved, strict=True):
+            _require_dynamic_attr_resolution(before, after, value)
+    elif base != probe:
+        raise ValueError('Dynamic AsStrided shape/stride expression could not be resolved from the probe; '
+                         'use an explicit symbolic shape or a window-operation adapter rather than fixed capture dimensions.')
 
 
 def _dynamicize_attr_value(value: Any, probe_value: Any, candidates: list[tuple[Any, Any, dict[str, Any]]]) -> Any:

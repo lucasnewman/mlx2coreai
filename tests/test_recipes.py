@@ -1,5 +1,6 @@
 """Recipe contracts and lifecycle, plus checkpoint-free real-model execution."""
 import asyncio
+from dataclasses import replace
 from io import BytesIO
 import subprocess
 import sys
@@ -64,6 +65,10 @@ def test_state_binding_not_last_output(tmp_path):
         {"x": np.ones(1, np.float32), "total": np.zeros(1, np.float32)}, ("doubled",),
         ConversionConfig(signature=CaptureSignature(output_count=2,
             states=(StateBinding(StateSpec("total", (1,), "fp32"), 0),))))
+    unoptimized = replace(component, config=replace(component.config, optimize=False))
+    with pytest.raises(ValueError, match="buffer promotion"):
+        export(Build("sum", {"main": unoptimized}), tmp_path / "unoptimized")
+    assert not (tmp_path / "unoptimized" / "manifest.json").exists()
     bundle = export(Build("sum", {"main": component}), tmp_path / "state")
 
     async def check():

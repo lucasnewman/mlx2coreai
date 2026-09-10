@@ -377,7 +377,12 @@ def _stateful_main_capture_function(
     key_cache_name: str,
     value_cache_name: str,
     cast_bf16_logits_to_fp16: bool,
+    array_cache_factory=None,
 ) -> Callable[..., tuple[Any, ...]]:
+    if array_cache_factory is None:
+        from .policy import array_cache_factory as select_array_cache
+        array_cache_factory = select_array_cache(layout)
+
     def capture(**kwargs: Any) -> tuple[Any, ...]:
         import mlx.core as mx  # noqa: PLC0415
 
@@ -398,7 +403,7 @@ def _stateful_main_capture_function(
             if is_linear or is_short_conv:
                 index = len(array_caches)
                 recurrent = kwargs["recurrentState"][index] if is_linear else None
-                cache = _ExportableRecurrentCache(kwargs["convState"][index], recurrent)
+                cache = array_cache_factory(kwargs["convState"][index], recurrent)
                 array_caches.append(cache)
             else:
                 cache = _ExportableLayeredKVCache(state, layer_idx=attention_index, offset=offset)

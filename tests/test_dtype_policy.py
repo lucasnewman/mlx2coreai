@@ -34,3 +34,10 @@ def test_execution_narrowing_remains_explicit(dtype, hint, target, description):
 def test_integer_narrowing_rejects_overflow():
     with pytest.raises(ValueError, match="safely downcast"):
         constant_array(np.array([2**40], dtype=np.int64))
+
+
+@pytest.mark.parametrize('dtype', [np.int32, np.float16, np.float32, np.complex64])
+def test_scalar_constant_rank(dtype):
+    value, _ = constant_array(np.array(1, dtype))
+    assert value.shape == ()
+    assert value.dtype == dtype

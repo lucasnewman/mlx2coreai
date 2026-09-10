@@ -34,7 +34,7 @@ def test_supported_operations_are_derived_from_executable_rules():
     ("reshape", [], (2, 3), "fp32", {"shape": [2, 3]}),
     ("broadcast_axes", [[-2, -1]], (3, 4), "fp32", {"ignore_axes": [-2, -1]}),
     ("take", [2], (2, 3), "fp32", {"axis": 2}),
-    ("gather", [[1], [2, 1]], (2, 3), "fp32", {"axis": 1, "slice_shape": [2, 1], "shape": [2, 3]}),
+    ("gather", [[1], [2, 1]], (2, 3), "fp32", {"axis": 1, "axes": [1], "slice_shape": [2, 1], "shape": [2, 3]}),
     ("reduce", [2, [1]], (2, 1), "fp32", {"mode": 2, "axes": [1], "keep_dims": True}),
     ("slice", [[0, 2], [2, 5], [1, 1]], (2, 3), "fp32", {"begin": [0, 2], "end": [2, 5], "stride": [1, 1]}),
     ("cast", [], (2,), "bf16", {"dtype": "bf16"}),

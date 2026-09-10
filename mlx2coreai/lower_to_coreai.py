@@ -13,7 +13,9 @@ import numpy as np
 from coreai._compiler.dialects import coreai
 from coreai._compiler.ir import (
     ArrayAttr,
+    Attribute,
     BF16Type,
+    ComplexType,
     DenseResourceElementsAttr,
     DictAttr,
     F16Type,
@@ -40,6 +42,7 @@ from .ir import Graph, Node, StateSpec, TensorSpec, is_dynamic_dim_ref
 from .op_registry import coreai_op_for_mlx, rule_for_mlx
 from .op_rules import less_equal
 from .passes import AnalyzedGraph, analyze_graph, infer_broadcast_axes_shape
+from . import _control_flow
 
 
 @dataclass(slots=True)
@@ -122,6 +125,8 @@ def _element_type(dtype: str) -> Type:
         return IntegerType.get_signed(32)
     if dtype == "bool":
         return IntegerType.get_signless(1)
+    if dtype == "complex64":
+        return ComplexType.get(F32Type.get())
     raise ValueError(f"Unsupported CoreAI dtype: {dtype}")
 
 
@@ -365,6 +370,9 @@ def _as_int_list(value: Any, count: int, *, default: int = 1) -> list[int]:
 
 
 class CoreAILowerer:
+    _emit_cond = _control_flow.emit_cond
+    _emit_while = _control_flow.emit_while
+
     def __init__(self, config: CoreAILoweringConfig | None = None) -> None:
         self.config = config or CoreAILoweringConfig()
         if self.config.gated_delta_implementation not in {"native", "decomposed"}:
@@ -655,6 +663,7 @@ class CoreAILowerer:
         assert self.module is not None
         assert self.location is not None
         assert self.current_graph is not None
+        caller_insertion_point = InsertionPoint.current
         self._private_graph_counter += 1
         graph_name = f"__mlx2coreai_{composite_name}_{self._private_graph_counter}_{node.output}"
         graph_name = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in graph_name)
@@ -680,7 +689,7 @@ class CoreAILowerer:
                 result = body(list(private.arguments))
                 private.set_outputs_spec_from_dict(OrderedDict([("output", result)]))
                 result_type = result.type if result_type is None else result_type
-        with self.current_graph.block:
+        with caller_insertion_point:
             [out] = coreai.invoke(
                 results=[result_type or input_values[0].type],
                 callee=graph_name,
@@ -821,6 +830,38 @@ class CoreAILowerer:
         begin = self._index_operand(node.attrs.get("begin"), rank, 0)
         end = self._index_operand(node.attrs.get("end"), rank, None, x=x)
         stride = self._index_operand(node.attrs.get("stride"), rank, 1)
+        steps = node.attrs.get("stride", [1] * rank)
+        spec = self.inferred.get(node.output)
+        if node.source and node.source.startswith('mlx_export:') and spec is not None and spec.shape is not None:
+            stops = list(node.attrs.get("end", []))
+            starts = node.attrs.get("begin", [])
+            for axis, size in enumerate(spec.shape):
+                if (axis < len(stops) and size >= 0 and isinstance(starts[axis], int)
+                        and isinstance(stops[axis], int) and (steps[axis] < 0 or stops[axis] < 0)):
+                    stops[axis] = starts[axis] + size * steps[axis]
+            if stops:
+                end = self._index_operand(stops, rank, None, x=x)
+        reverse_axes = [axis for axis, step in enumerate(steps) if step < 0]
+        if reverse_axes:
+            # Reverse first: CoreAI interprets negative end bounds relative to
+            # the end, while MLX may serialize a sentinel before the first item.
+            starts, stops = [], []
+            for axis in range(rank):
+                if isinstance(begin, np.ndarray) and isinstance(end, np.ndarray) and int(x.type.shape[axis]) >= 0:
+                    last = int(x.type.shape[axis]) - 1
+                    starts.append(last - int(begin[axis]) if axis in reverse_axes else int(begin[axis]))
+                    stops.append(last - int(end[axis]) if axis in reverse_axes else int(end[axis]))
+                    continue
+                start = coreai.slice_(begin, [axis], [axis + 1], [1])
+                stop = coreai.slice_(end, [axis], [axis + 1], [1])
+                if axis in reverse_axes:
+                    last = coreai.broadcasting_sub(_dim_1d_from_value(x, axis), 1)
+                    start, stop = coreai.broadcasting_sub(last, start), coreai.broadcasting_sub(last, stop)
+                starts.append(start)
+                stops.append(stop)
+            x = coreai.reverse(x, np.asarray(reverse_axes, np.int32))
+            begin, end = _mixed_shape_operand(starts), _mixed_shape_operand(stops)
+            stride = np.asarray([abs(step) for step in steps], np.int32)
         result = coreai.slice_(x, begin, end, stride)
         spec = self.inferred.get(node.output)
         if spec is not None and spec.shape is not None and len(spec.shape) == _rank(result):
@@ -850,7 +891,117 @@ class CoreAILowerer:
         x = self.env[node.inputs[0]]
         indices = self.env[node.inputs[1]]
         axis = _normalize_axis(int(node.attrs.get("axis", 0)), _rank(x))
+        indices = _normalize_indices(indices, x, axis)
         return coreai.gather_along_axis(x, indices, np.asarray(axis, dtype=np.int32))
+
+    def _emit_sort(self, node: Node, *, indices: bool) -> Value:
+        x = self.env[node.inputs[0]]
+        axis = _normalize_axis(int(node.attrs["axis"]), _rank(x))
+        # A fully sorted result satisfies partition's intentionally unspecified
+        # ordering within either partition, including every possible kth value.
+        fn = coreai.argsort if indices else coreai.sort
+        result = fn(x, np.int32(axis), False, True)
+        return coreai.cast(result, np.int32) if indices else result
+
+    def _emit_scatter_axis(self, node: Node) -> Value:
+        x, indices, updates = [self.env[name] for name in node.inputs]
+        indices = _normalize_indices(indices, x, int(node.attrs['axis']))
+        return coreai.scatter_along_axis(x.type, x, indices, updates,
+            np.int32(node.attrs['axis']), scatter_mode=Attribute.parse(f"#coreai.scatter_mode<{node.attrs['mode']}>"))
+
+    def _emit_scatter(self, node: Node) -> Value:
+        x, *indices, updates = [self.env[name] for name in node.inputs]
+        axes = node.attrs['axes']
+        rank = _rank(x)
+        prefix_rank = _rank(updates) - rank
+        if len(indices) != len(axes) or prefix_rank < 0:
+            raise ValueError('Invalid MLX scatter index/window layout.')
+        # ScatterNd only verifies replacement regions; linear addresses allow
+        # ScatterAlongAxis to preserve every MLX reduction mode.
+        window = [int(updates.type.shape[prefix_rank + i]) if int(updates.type.shape[prefix_rank + i]) >= 0
+                  else _dim_scalar_from_value(updates, prefix_rank + i) for i in range(rank)]
+        linear = _window_addresses(x, indices, axes, window)
+        linear = coreai.broadcast_to(linear, coreai.get_shape(updates))
+        flat_x = coreai.reshape(x, [-1])
+        result = coreai.scatter_along_axis(flat_x.type, flat_x,
+            coreai.reshape(linear, [-1]), coreai.reshape(updates, [-1]), np.int32(0),
+            scatter_mode=Attribute.parse(f"#coreai.scatter_mode<{node.attrs['mode']}>"))
+        return _reshape_like(result, x)
+
+    def _emit_gather_mm(self, node: Node) -> Value:
+        lhs, rhs, lhs_indices, rhs_indices = [self.env[name] for name in node.inputs]
+        def flatten_batch(value):
+            if all(int(dim) >= 0 for dim in value.type.shape):
+                return coreai.reshape(value, [math.prod(value.type.shape[:-2]), *value.type.shape[-2:]])
+            return _reshape_with_mixed_shape(value, [-1,
+                _dim_1d_from_value(value, -2), _dim_1d_from_value(value, -1)])
+        lhs, rhs = flatten_batch(lhs), flatten_batch(rhs)
+        lhs_indices, rhs_indices = coreai.cast(lhs_indices, np.uint32), coreai.cast(rhs_indices, np.uint32)
+        def body(args):
+            a, b, ai, bi = args
+            a = coreai.gather_nd(a, coreai.expand_dims(coreai.cast(ai, np.int32), [_rank(ai)]))
+            b = coreai.gather_nd(b, coreai.expand_dims(coreai.cast(bi, np.int32), [_rank(bi)]))
+            return coreai.broadcasting_batch_matmul(a, b)
+        return self._emit_private_composite(node=node, composite_name='gather_mm',
+            input_values=[lhs, rhs, lhs_indices, rhs_indices],
+            input_names=['lhs', 'rhs', 'lhs_indices', 'rhs_indices'],
+            attrs={'num_batch_axes': 0}, body=body)
+
+    def _emit_as_strided(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        shape, strides = node.attrs['shape'], node.attrs['strides']
+        linear = self._scalar_operand(node.attrs.get('offset', 0))
+        for axis, (size, stride) in enumerate(zip(shape, strides, strict=True)):
+            count = self._scalar_operand(size)
+            coordinates = _range_to(count, size if isinstance(size, int) else -1)
+            coordinates = coreai.expand_dims(coordinates, [i for i in range(len(shape)) if i != axis])
+            linear = coreai.broadcasting_add(linear, coreai.broadcasting_mul(coordinates, self._scalar_operand(stride)))
+        indices = coreai.expand_dims(linear, [len(shape)])
+        return coreai.gather_nd(coreai.reshape(x, [-1]), indices)
+
+    def _emit_nonzero(self, node: Node) -> Value:
+        return coreai.cast(coreai.non_zero(self.env[node.inputs[0]]), np.int32)
+
+    def _emit_masked_scatter(self, node: Node) -> Value:
+        x, mask, source = [self.env[name] for name in node.inputs]
+        mask = coreai.reshape(coreai.broadcast_to(mask, coreai.get_shape(x)), [-1])
+        source = coreai.cast(source, x.type.element_type)
+        if _rank(source) != 1:
+            source = coreai.reshape(source, [-1])
+        # Reserve index zero for false mask entries, including an empty source.
+        # True entries consume source positions in row-major order starting at 1.
+        source = coreai.concat(0, [coreai.constant(np.zeros(1), dtype=x.type.element_type), source])
+        index = coreai.scan(coreai.cast(mask, np.int32), np.uint32(0), False, combiner='sum')
+        index = coreai.broadcasting_where(mask, index, coreai.constant(0, dtype=np.int32))
+        values = coreai.gather_along_axis(source, index, np.int32(0))
+        return _reshape_like(coreai.broadcasting_where(mask, values, coreai.reshape(x, [-1])), x)
+
+    def _emit_scan(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        axis = _normalize_axis(int(node.attrs["axis"]), _rank(x))
+        modes = {0: "max", 1: "min", 2: "sum", 3: "product"}
+        mode = node.attrs["mode"]
+        if mode not in modes:
+            raise ValueError(f"Unsupported MLX Scan mode: {mode}. Expected max/min/sum/product.")
+        combiner = modes[mode]
+        reverse = bool(node.attrs.get("reverse", False))
+        result = coreai.scan(x, np.uint32(axis), reverse, combiner=combiner)
+        if node.attrs.get("inclusive", True):
+            return result
+        if combiner in {"sum", "product"}:
+            identity = 0 if combiner == "sum" else 1
+        elif IntegerType.isinstance(x.type.element_type):
+            dtype = IntegerType(x.type.element_type)
+            identity = -(1 << (dtype.width - 1)) if combiner == "max" else (1 << (dtype.width - 1)) - 1
+        else:
+            identity = float('-inf') if combiner == "max" else float('inf')
+        padding = [0] * (2 * _rank(x))
+        padding[2 * axis + int(reverse)] = 1
+        padded = coreai.pad(result, np.asarray(padding, np.uint32), coreai.constant(identity, dtype=x.type.element_type))
+        begin = [0] * _rank(x)
+        begin[axis] = int(reverse)
+        end = coreai.broadcasting_add(coreai.cast(coreai.get_shape(x), np.int32), np.asarray(begin, np.int32))
+        return coreai.slice_(padded, begin, end, [1] * _rank(x))
 
     def _emit_select(self, node: Node) -> Value:
         return coreai.broadcasting_where(
@@ -859,7 +1010,44 @@ class CoreAILowerer:
 
     def _emit_cast(self, node: Node) -> Value:
         dtype = _normalize_dtype(str(node.attrs.get("dtype", "fp32")))
-        return coreai.cast(self.env[node.inputs[0]], _element_type(dtype))
+        x = self.env[node.inputs[0]]
+        complex_input = ComplexType.isinstance(x.type.element_type)
+        if dtype == 'complex64':
+            if complex_input:
+                return x
+            real = coreai.cast(x, F32Type.get())
+            imaginary = coreai.broadcast_to(coreai.constant(0, dtype=np.float32), coreai.get_shape(real))
+            return coreai.create_complex(real, imaginary)
+        if complex_input:
+            if dtype == 'bool':
+                return coreai.broadcasting_or(coreai.broadcasting_not_equal(coreai.real_part(x), 0.0),
+                    coreai.broadcasting_not_equal(coreai.imaginary_part(x), 0.0))
+            x = coreai.real_part(x)
+        return coreai.cast(x, _element_type(dtype))
+
+    def _emit_conjugate(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        return coreai.create_complex(coreai.real_part(x), coreai.broadcasting_mul(coreai.imaginary_part(x), -1.0))
+
+    def _emit_view(self, node: Node) -> Value:
+        x = self.env[node.inputs[0]]
+        dtype = node.attrs['dtype']
+        if dtype == 'fp32' and ComplexType.isinstance(x.type.element_type):
+            real, imag = coreai.real_part(x), coreai.imaginary_part(x)
+            parts = coreai.concat(_rank(x), [coreai.expand_dims(real, [_rank(x)]), coreai.expand_dims(imag, [_rank(x)])])
+            shape = _value_shape_operand(x, overrides={_rank(x) - 1: coreai.broadcasting_mul(_dim_1d_from_value(x, -1), 2)})
+            return coreai.reshape(parts, shape)
+        if dtype == 'complex64' and F32Type.isinstance(x.type.element_type):
+            begin, stride = [0] * _rank(x), [1] * _rank(x)
+            stride[-1] = 2
+            end = _value_shape_operand(x)
+            real = coreai.slice_(x, begin, end, stride)
+            begin[-1] = 1
+            imag = coreai.slice_(x, begin, end, stride)
+            return coreai.create_complex(real, imag)
+        if x.type.element_type == _element_type(dtype):
+            return x
+        raise ValueError(f'Unsupported bit reinterpretation from {x.type.element_type} to {dtype}.')
 
     def _emit_number_of_elements(self, node: Node) -> Value:
         x = self.env[node.inputs[0]]
@@ -888,18 +1076,17 @@ class CoreAILowerer:
         start = node.attrs.get("start", 0)
         stop = node.attrs.get("stop", node.attrs.get("end", 0))
         step = node.attrs.get("step", 1)
+        dtype = _element_type(node.attrs.get('dtype', 'int32'))
+        def scalar(value):
+            return coreai.cast(self._scalar_operand(value), dtype) if is_dynamic_dim_ref(value) else coreai.constant(value, dtype=dtype)
         if is_dynamic_dim_ref(start) or is_dynamic_dim_ref(stop) or is_dynamic_dim_ref(step):
             dyn = RankedTensorType.get_dynamic_size()
             return coreai.RangeOp(
-                self._scalar_operand(start),
-                self._scalar_operand(stop),
-                self._scalar_operand(step),
-                results=[RankedTensorType.get([dyn], IntegerType.get_signed(32))],
+                scalar(start), scalar(stop), scalar(step),
+                results=[RankedTensorType.get([dyn], dtype)],
             ).result
         return coreai.range_(
-            coreai.constant(int(start), dtype=np.int32),
-            coreai.constant(int(stop), dtype=np.int32),
-            coreai.constant(int(step), dtype=np.int32),
+            scalar(start), scalar(stop), scalar(step),
         )
 
     def _emit_gated_delta_update(self, node: Node) -> Value | tuple[Value, ...]:
@@ -1224,6 +1411,14 @@ class CoreAILowerer:
         rank = _rank(x)
         axis = _normalize_axis(int(node.attrs.get("axis", 0)), rank)
         slice_shape = list(node.attrs.get("slice_shape", []))
+        axes = node.attrs.get('axes', [axis])
+        full_slices = all(i == axis or is_dynamic_dim_ref(size) or int(x.type.shape[i]) < 0
+                          or size == int(x.type.shape[i]) for i, size in enumerate(slice_shape))
+        if len(node.inputs) > 2 or not full_slices or (slice_shape and slice_shape[axis] != 1):
+            window = [self._scalar_operand(size) if is_dynamic_dim_ref(size) else int(size) for size in slice_shape]
+            addresses = _window_addresses(x, [self.env[name] for name in node.inputs[1:]], axes, window)
+            result = coreai.gather_nd(coreai.reshape(x, [-1]), coreai.expand_dims(addresses, [_rank(addresses)]))
+            return result
         if slice_shape:
             if len(slice_shape) != rank:
                 raise ValueError(
@@ -1254,7 +1449,9 @@ class CoreAILowerer:
             source = coreai.transpose(x, np.asarray([axis, *range(axis), *range(axis + 1, rank)], dtype=np.uint32))
         index_shape = _static_or_dynamic_shape(indices)
         coords = (
-            coreai.reshape(indices, _as_shape_value([1]))
+            # MPS rejects scalar gather_nd results. Keep a one-element index
+            # batch and restore the MLX result shape below instead.
+            coreai.reshape(indices, _as_shape_value([1, 1]))
             if not index_shape
             else coreai.expand_dims(indices, [len(index_shape)])
         )
@@ -1782,6 +1979,37 @@ class CoreAILowerer:
             body=body,
             result_type=result_type,
         )
+
+
+def _range_to(count: Value, static_size: int = -1) -> Value:
+    return coreai.RangeOp(coreai.constant(0, dtype=np.int32), count, coreai.constant(1, dtype=np.int32),
+        results=[RankedTensorType.get([static_size if static_size >= 0 else RankedTensorType.get_dynamic_size()], IntegerType.get_signed(32))]).result
+
+
+def _window_addresses(x: Value, indices: list[Value], axes: list[int], window: list[Any]) -> Value:
+    rank, prefix_rank = _rank(x), _rank(indices[0])
+    if len(window) != rank or len(indices) != len(axes):
+        raise ValueError('Invalid gather/scatter window layout.')
+    linear = coreai.constant(0, dtype=np.int32)
+    stride = coreai.constant(1, dtype=np.int32)
+    for axis in reversed(range(rank)):
+        size = window[axis]
+        count = size if isinstance(size, Value) else coreai.constant(size, dtype=np.int32)
+        coordinate = _range_to(count, size if isinstance(size, int) else -1)
+        coordinate = coreai.expand_dims(coordinate, [i for i in range(prefix_rank + rank) if i != prefix_rank + axis])
+        if axis in axes:
+            index = _normalize_indices(indices[axes.index(axis)], x, axis)
+            index = coreai.expand_dims(index, list(range(prefix_rank, prefix_rank + rank)))
+            coordinate = coreai.broadcasting_add(coordinate, index)
+        linear = coreai.broadcasting_add(linear, coreai.broadcasting_mul(coordinate, stride))
+        stride = coreai.broadcasting_mul(stride, _dim_scalar_from_value(x, axis))
+    return linear
+
+
+def _normalize_indices(indices: Value, x: Value, axis: int) -> Value:
+    indices = coreai.cast(indices, np.int32)
+    return coreai.broadcasting_where(coreai.broadcasting_greater(0, indices),
+        coreai.broadcasting_add(indices, _dim_scalar_from_value(x, axis)), indices)
 
 
 def _pad_index(value: Any, rank: int, default: int | None, *, x: Value | None = None) -> list[int]:

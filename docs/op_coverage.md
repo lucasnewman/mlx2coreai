@@ -4,13 +4,13 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 
 ## Summary
 
-- Supported source op names in registry: 158
-- Distinct lowering keys in registry: 123
+- Supported source op names in registry: 198
+- Distinct lowering keys in registry: 155
 - Coverage modules: `tests.model_zoo, tests.coverage_zoo`
-- Coverage graphs: 27
-- Coverage graph nodes: 255
-- Unique source ops exercised: 158
-- Unique lowering keys exercised: 123
+- Coverage graphs: 31
+- Coverage graph nodes: 296
+- Unique source ops exercised: 198
+- Unique lowering keys exercised: 155
 - Asset validation: passed
 
 ## Exercised Ops
@@ -25,12 +25,20 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `any` | `any` | 1 | `logical_checks` |
 | `arange` | `arange` | 1 | `creation_helpers` |
 | `arccos` | `acos` | 1 | `p0_math_pack` |
+| `arccosh` | `acosh` | 1 | `supplemental_extended_ops` |
 | `arcsin` | `asin` | 1 | `p0_math_pack` |
+| `arcsinh` | `asinh` | 1 | `supplemental_extended_ops` |
 | `arctan` | `atan` | 1 | `p0_math_pack` |
+| `arctan2` | `atan2` | 1 | `supplemental_extended_ops` |
 | `arctanh` | `atanh` | 1 | `p0_math_pack` |
 | `argmax` | `reduce_argmax` | 1 | `reduction_suite` |
 | `argmin` | `reduce_argmin` | 1 | `reduction_suite` |
+| `argpartition` | `argsort` | 1 | `supplemental_extended_ops` |
+| `argreduce` | `argreduce` | 1 | `reduction_suite` |
+| `argsort` | `argsort` | 1 | `supplemental_extended_ops` |
 | `array_equal` | `array_equal` | 1 | `logical_checks` |
+| `as_strided` | `as_strided` | 1 | `supplemental_extended_ops` |
+| `asstrided` | `as_strided` | 1 | `supplemental_extended_ops` |
 | `astype` | `cast` | 2 | `creation_helpers` |
 | `atleast_1d` | `atleast_1d` | 1 | `shape_helpers` |
 | `atleast_2d` | `atleast_2d` | 1 | `shape_helpers` |
@@ -41,9 +49,12 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `broadcast_axes` | `broadcast_axes` | 1 | `supplemental_shape_index` |
 | `broadcast_to` | `broadcast_to` | 1 | `supplemental_shape_index` |
 | `cast` | `cast` | 13 | `logical_checks`, `numeric_sanity`, `p0_math_pack`, `stats_divmod` |
+| `ceil` | `ceil` | 1 | `supplemental_extended_ops` |
 | `concatenate` | `concat` | 1 | `p0_math_pack` |
+| `cond` | `cond` | 1 | `supplemental_control_flow` |
+| `conjugate` | `conjugate` | 1 | `supplemental_complex_ops` |
 | `const` | `const` | 1 | `supplemental_constants_identity` |
-| `constant` | `const` | 1 | `supplemental_constants_identity` |
+| `constant` | `const` | 2 | `reduction_suite`, `supplemental_constants_identity` |
 | `contiguous` | `identity` | 1 | `supplemental_constants_identity` |
 | `conv1d` | `conv` | 1 | `supplemental_convolutions` |
 | `conv2d` | `conv` | 1 | `conv_block` |
@@ -55,6 +66,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `convolution` | `conv` | 1 | `supplemental_convolutions` |
 | `copy` | `identity` | 1 | `supplemental_constants_identity` |
 | `cos` | `cos` | 1 | `supplemental_unary_canonical` |
+| `cosh` | `cosh` | 1 | `supplemental_extended_ops` |
 | `degrees` | `degrees` | 1 | `p0_math_pack` |
 | `diag` | `diag` | 2 | `diagonal_trace` |
 | `diagonal` | `diagonal` | 1 | `diagonal_trace` |
@@ -70,16 +82,21 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `expm1` | `expm1` | 1 | `p0_math_pack` |
 | `eye` | `eye` | 1 | `meshgrid_kron` |
 | `flatten` | `flatten` | 1 | `shape_helpers` |
+| `floor` | `floor` | 1 | `supplemental_extended_ops` |
 | `floor_div` | `floor_div` | 1 | `supplemental_aliases_and_bitwise` |
 | `floor_divide` | `floor_div` | 1 | `p0_math_pack` |
 | `full` | `full` | 1 | `creation_helpers` |
 | `full_like` | `full_like` | 1 | `creation_helpers` |
 | `gated_delta_update` | `gated_delta_update` | 2 | `supplemental_gated_delta` |
 | `gather` | `gather` | 1 | `supplemental_shape_index` |
+| `gather_mm` | `gather_mm` | 1 | `supplemental_extended_ops` |
+| `gatheraxis` | `gather_along_axis` | 1 | `supplemental_extended_ops` |
+| `gathermm` | `gather_mm` | 1 | `supplemental_extended_ops` |
 | `gelu` | `gelu` | 1 | `supplemental_unary_canonical` |
 | `greater` | `greater` | 1 | `supplemental_binary_canonical` |
 | `greater_equal` | `greater_equal` | 1 | `supplemental_binary_canonical` |
 | `greaterequal` | `greater_equal` | 1 | `supplemental_aliases_and_bitwise` |
+| `imag` | `imag` | 1 | `supplemental_complex_ops` |
 | `inner` | `inner` | 1 | `supplemental_linear_misc` |
 | `inverse` | `inverse` | 1 | `supplemental_aliases_and_bitwise` |
 | `isclose` | `isclose` | 1 | `numeric_sanity` |
@@ -99,7 +116,14 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `log1p` | `log1p` | 1 | `p0_math_pack` |
 | `log2` | `log2` | 1 | `p0_math_pack` |
 | `logaddexp` | `logaddexp` | 1 | `meshgrid_kron` |
+| `logical_and` | `logical_and` | 1 | `supplemental_extended_ops` |
+| `logical_not` | `logical_not` | 1 | `supplemental_extended_ops` |
+| `logical_or` | `logical_or` | 1 | `supplemental_extended_ops` |
+| `logicaland` | `logical_and` | 1 | `supplemental_extended_ops` |
+| `logicalnot` | `logical_not` | 1 | `supplemental_extended_ops` |
+| `logicalor` | `logical_or` | 1 | `supplemental_extended_ops` |
 | `logsumexp` | `reduce_log_sum_exp` | 1 | `p0_math_pack` |
+| `masked_scatter` | `masked_scatter` | 1 | `supplemental_data_dependent_ops` |
 | `matmul` | `matmul` | 1 | `linear_relu` |
 | `max` | `reduce_max` | 1 | `reduction_suite` |
 | `maximum` | `maximum` | 3 | `conv_block`, `linear_relu`, `mlp_2layer` |
@@ -113,17 +137,21 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `multiply` | `mul` | 1 | `arithmetic_chain` |
 | `nan_to_num` | `nan_to_num` | 1 | `numeric_sanity` |
 | `negative` | `negative` | 1 | `p0_math_pack` |
+| `nonzero` | `nonzero` | 1 | `supplemental_data_dependent_ops` |
 | `not_equal` | `not_equal` | 1 | `supplemental_binary_canonical` |
 | `notequal` | `not_equal` | 1 | `supplemental_aliases_and_bitwise` |
 | `number_of_elements` | `number_of_elements` | 1 | `creation_helpers` |
 | `ones` | `ones` | 1 | `creation_helpers` |
 | `ones_like` | `ones_like` | 1 | `creation_helpers` |
 | `outer` | `outer` | 1 | `supplemental_linear_misc` |
+| `pad` | `pad` | 1 | `reduction_suite` |
+| `partition` | `sort` | 1 | `supplemental_extended_ops` |
 | `pow` | `pow` | 1 | `supplemental_binary_canonical` |
 | `power` | `pow` | 1 | `arithmetic_chain` |
 | `prod` | `reduce_prod` | 1 | `reduction_suite` |
 | `radians` | `radians` | 1 | `p0_math_pack` |
 | `read_state` | `read_state` | 1 | `supplemental_state_ops` |
+| `real` | `real` | 1 | `supplemental_complex_ops` |
 | `real_div` | `real_div` | 1 | `supplemental_binary_canonical` |
 | `reciprocal` | `inverse` | 1 | `arithmetic_chain` |
 | `reduce` | `reduce` | 1 | `supplemental_reductions_canonical` |
@@ -138,20 +166,28 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `reshape` | `reshape` | 1 | `supplemental_shape_index` |
 | `rmsnorm` | `rmsnorm` | 1 | `supplemental_nn_composites` |
 | `rope` | `rope` | 1 | `supplemental_nn_composites` |
+| `round` | `round` | 1 | `supplemental_extended_ops` |
 | `rsqrt` | `rsqrt` | 1 | `supplemental_unary_canonical` |
 | `scaled_dot_product_attention` | `scaled_dot_product_attention` | 1 | `supplemental_nn_composites` |
 | `scaleddotproductattention` | `scaled_dot_product_attention` | 1 | `supplemental_aliases_and_bitwise` |
+| `scan` | `scan` | 1 | `supplemental_extended_ops` |
+| `scatter` | `scatter` | 1 | `supplemental_extended_ops` |
+| `scatteraxis` | `scatter_axis` | 1 | `supplemental_extended_ops` |
 | `select` | `select` | 1 | `supplemental_linear_misc` |
 | `sigmoid` | `sigmoid` | 1 | `supplemental_unary_canonical` |
+| `sign` | `sign` | 1 | `supplemental_extended_ops` |
 | `silu` | `silu` | 1 | `supplemental_unary_canonical` |
 | `sin` | `sin` | 1 | `supplemental_unary_canonical` |
+| `sinh` | `sinh` | 1 | `supplemental_extended_ops` |
 | `slice` | `slice_by_index` | 1 | `indexing_transforms` |
 | `slice_by_index` | `slice_by_index` | 1 | `supplemental_shape_index` |
 | `slice_update` | `slice_update` | 1 | `supplemental_shape_index` |
 | `sliceupdate` | `slice_update` | 1 | `supplemental_aliases_and_bitwise` |
 | `softmax` | `softmax` | 1 | `supplemental_nn_composites` |
+| `sort` | `sort` | 1 | `supplemental_extended_ops` |
 | `split` | `split` | 1 | `supplemental_shape_index` |
 | `sqrt` | `sqrt` | 1 | `supplemental_unary_canonical` |
+| `square` | `square` | 1 | `supplemental_unary_canonical` |
 | `squeeze` | `squeeze` | 1 | `supplemental_shape_index` |
 | `state_update_masked` | `state_update_masked` | 1 | `supplemental_state_ops` |
 | `std` | `std` | 1 | `stats_divmod` |
@@ -162,6 +198,7 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `swapaxes` | `swapaxes` | 1 | `indexing_transforms` |
 | `take` | `gather` | 1 | `indexing_transforms` |
 | `take_along_axis` | `gather_along_axis` | 1 | `indexing_transforms` |
+| `tan` | `tan` | 1 | `supplemental_extended_ops` |
 | `tanh` | `tanh` | 1 | `supplemental_unary_canonical` |
 | `tensordot` | `tensordot` | 1 | `broadcast_tensordot` |
 | `trace` | `trace` | 1 | `diagonal_trace` |
@@ -169,9 +206,12 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `tri` | `tri` | 1 | `tri_band` |
 | `tril` | `tril` | 2 | `tri_band` |
 | `triu` | `triu` | 2 | `tri_band` |
+| `trunc` | `trunc` | 1 | `supplemental_extended_ops` |
 | `unflatten` | `unflatten` | 1 | `shape_helpers` |
 | `var` | `var` | 1 | `stats_divmod` |
+| `view` | `view` | 1 | `supplemental_complex_ops` |
 | `where` | `select` | 1 | `creation_helpers` |
+| `while_loop` | `while_loop` | 1 | `supplemental_control_flow` |
 | `write_state` | `write_state` | 1 | `supplemental_state_ops` |
 | `zeros` | `zeros` | 1 | `creation_helpers` |
 | `zeros_like` | `zeros_like` | 1 | `creation_helpers` |
@@ -192,21 +232,25 @@ Coverage type: CoreAI asset generation. This does not imply runtime numerical pa
 | `tests.model_zoo` | `mlp_2layer` | 3 | 2 | passed |
 | `tests.model_zoo` | `numeric_sanity` | 7 | 6 | passed |
 | `tests.model_zoo` | `p0_math_pack` | 38 | 17 | passed |
-| `tests.model_zoo` | `reduction_suite` | 7 | 7 | passed |
+| `tests.model_zoo` | `reduction_suite` | 10 | 10 | passed |
 | `tests.model_zoo` | `shape_helpers` | 5 | 5 | passed |
 | `tests.model_zoo` | `stats_divmod` | 13 | 6 | passed |
 | `tests.model_zoo` | `tri_band` | 14 | 5 | passed |
 | `tests.coverage_zoo` | `supplemental_aliases_and_bitwise` | 9 | 9 | passed |
 | `tests.coverage_zoo` | `supplemental_binary_canonical` | 12 | 12 | passed |
+| `tests.coverage_zoo` | `supplemental_complex_ops` | 4 | 4 | passed |
 | `tests.coverage_zoo` | `supplemental_constants_identity` | 5 | 5 | passed |
+| `tests.coverage_zoo` | `supplemental_control_flow` | 2 | 2 | passed |
 | `tests.coverage_zoo` | `supplemental_convolutions` | 5 | 5 | passed |
+| `tests.coverage_zoo` | `supplemental_data_dependent_ops` | 2 | 2 | passed |
+| `tests.coverage_zoo` | `supplemental_extended_ops` | 29 | 29 | passed |
 | `tests.coverage_zoo` | `supplemental_gated_delta` | 2 | 1 | passed |
 | `tests.coverage_zoo` | `supplemental_linear_misc` | 3 | 3 | passed |
 | `tests.coverage_zoo` | `supplemental_nn_composites` | 5 | 5 | passed |
 | `tests.coverage_zoo` | `supplemental_reductions_canonical` | 8 | 8 | passed |
 | `tests.coverage_zoo` | `supplemental_shape_index` | 12 | 12 | passed |
 | `tests.coverage_zoo` | `supplemental_state_ops` | 3 | 3 | passed |
-| `tests.coverage_zoo` | `supplemental_unary_canonical` | 12 | 12 | passed |
+| `tests.coverage_zoo` | `supplemental_unary_canonical` | 13 | 13 | passed |
 
 ## Unexercised Registry Ops
 

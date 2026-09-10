@@ -73,9 +73,11 @@ def export(build: Build, output: str | Path, *, only=None, save_graphs=False) ->
             component = build.components[name]
             if component.config.state_specs is not None:
                 raise ValueError("Recipe components declare state through CaptureSignature, not state_specs.")
+            bindings = component.config.signature.states if component.config.signature else ()
+            if bindings and not component.config.optimize:
+                raise ValueError("Mutable-state components require optimization for CoreAI buffer promotion.")
             print(f"Converting {name}", flush=True)
             prepared = prepare_mlx_conversion(component.forward, component.inputs, config=component.config)
-            bindings = component.config.signature.states if component.config.signature else ()
             state_indices = {binding.output_index for binding in bindings}
             public = [value for i, value in enumerate(prepared.normalized_graph.outputs) if i not in state_indices]
             if (len(public) != len(component.outputs)
@@ -83,6 +85,8 @@ def export(build: Build, output: str | Path, *, only=None, save_graphs=False) ->
                     or len(set(component.outputs)) != len(component.outputs)):
                 raise ValueError(f"{name}: declare one unique name per public output.")
             converted = convert_prepared_mlx_to_coreai(prepared, output_path=staging / f"{name}.aimodel")
+            if bindings and not converted.lowered.optimized:
+                raise ValueError("CoreAI buffer promotion was skipped for a mutable-state component.")
             if save_graphs:
                 (staging / f"{name}_graph.json").write_text(json.dumps(prepared.normalized_graph.to_dict(), indent=2) + "\n")
             manifest["components"][name] = {

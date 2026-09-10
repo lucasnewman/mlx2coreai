@@ -291,7 +291,67 @@ def _gated_delta(seed: int) -> CoverageModelSpec:
     return CoverageModelSpec("supplemental_gated_delta", "Experimental dynamic gated-delta composite", graph)
 
 
+def _extended_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    unary = ['floor', 'ceil', 'round', 'sign', 'trunc', 'arccosh', 'arcsinh', 'cosh', 'sinh', 'tan']
+    nodes = [Node(op, ('x',), op + '_out') for op in unary]
+    nodes.extend(Node(op, ('p', 'q'), op + '_out') for op in ['logical_and', 'logicaland', 'logical_or', 'logicalor'])
+    nodes.extend(Node(op, ('p',), op + '_out') for op in ['logical_not', 'logicalnot'])
+    nodes += [
+        Node('arctan2', ('x', 'x'), 'atan2_out'),
+        Node('gatheraxis', ('x', 'i'), 'gather_axis_out', attrs={'axis': 1}),
+        Node('scan', ('x',), 'scan_out', attrs={'axis': 1, 'mode': 2, 'inclusive': False, 'reverse': True}),
+        Node('scatteraxis', ('x', 'i', 'x'), 'scatter_axis_out', attrs={'axis': 1, 'mode': 'update'}),
+        Node('scatter', ('x', 'j', 'u'), 'scatter_out', attrs={'axes': [0], 'mode': 'add'}),
+    ]
+    nodes.extend(Node(op, ('x',), op + '_out', attrs={'axis': 1, 'kth': 1})
+                 for op in ['sort', 'argsort', 'partition', 'argpartition'])
+    nodes.extend(Node(op, ('a', 'b', 'j', 'j'), op + '_out') for op in ['gathermm', 'gather_mm'])
+    nodes.extend(Node(op, ('x',), op + '_out', attrs={'shape': [2, 2], 'strides': [3, 1], 'offset': 0})
+                 for op in ['asstrided', 'as_strided'])
+    graph = Graph([
+        TensorSpec('x', (2, 3), 'fp32'), TensorSpec('p', (2, 3), 'bool'), TensorSpec('q', (2, 3), 'bool'),
+        TensorSpec('i', (2, 3), 'int32'), TensorSpec('j', (2,), 'int32'), TensorSpec('u', (2, 1, 3), 'fp32'),
+        TensorSpec('a', (2, 3, 4), 'fp32'), TensorSpec('b', (2, 4, 3), 'fp32'),
+    ], nodes, [node.output for node in nodes])
+    return CoverageModelSpec('supplemental_extended_ops', 'Elementwise, scan, selection and window indexing', graph)
+
+
+def _complex_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    nodes = [Node(op, ('x',), op + '_out') for op in ['real', 'imag', 'conjugate']]
+    nodes.append(Node('view', ('x',), 'view_out', attrs={'dtype': 'fp32'}))
+    return CoverageModelSpec('supplemental_complex_ops', 'Complex components, conjugation and storage views',
+        Graph([TensorSpec('x', (2, 3), 'complex64')], nodes, [node.output for node in nodes]))
+
+
+def _data_dependent_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    graph = Graph([TensorSpec('x', (2, 3), 'fp32'), TensorSpec('mask', (2, 3), 'bool'), TensorSpec('source', (6,), 'fp32')],
+        [Node('nonzero', ('x',), 'indices'), Node('masked_scatter', ('x', 'mask', 'source'), 'updated')],
+        ['indices', 'updated'])
+    return CoverageModelSpec('supplemental_data_dependent_ops', 'Nonzero and masked scatter', graph)
+
+
+def _control_flow_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    inputs = [TensorSpec('x', (), 'int32'), TensorSpec('limit', (), 'int32')]
+    condition = Graph(inputs, [Node('less', ('x', 'limit'), 'test')], ['test'])
+    body = Graph(inputs, [Node('constant', (), 'one', {'value': np.array(1, np.int32)}),
+        Node('add', ('x', 'one'), 'next')], ['next'])
+    branch = Graph(inputs, [], ['x'])
+    graph = Graph([TensorSpec('predicate', (), 'bool'), *inputs], [
+        Node('cond', ('predicate', 'x', 'limit'), 'selected', {'then': branch, 'else': branch}),
+        Node('while_loop', ('selected', 'limit'), 'out', {'condition': condition, 'body': body, 'carried_count': 1}),
+    ], ['out'])
+    return CoverageModelSpec('supplemental_control_flow', 'Explicit conditional and loop subgraphs', graph)
+
+
 _BUILDERS: dict[str, Callable[[int], CoverageModelSpec]] = {
+    "supplemental_control_flow": _control_flow_ops,
+    "supplemental_extended_ops": _extended_ops,
+    "supplemental_complex_ops": _complex_ops,
+    "supplemental_data_dependent_ops": _data_dependent_ops,
     "supplemental_gated_delta": _gated_delta,
     "supplemental_aliases_and_bitwise": _aliases_and_bitwise,
     "supplemental_binary_canonical": _binary_canonical,

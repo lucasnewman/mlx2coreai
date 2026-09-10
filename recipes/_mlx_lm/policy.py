@@ -34,3 +34,11 @@ def warn_precision(layout, precision):
     elif layout.num_short_conv_layers:
         from recipes.lfm2.adapter import warn_precision
         warn_precision(precision)
+
+
+def array_cache_factory(layout):
+    if layout.num_short_conv_layers:
+        from recipes.lfm2.adapter import ArrayCache
+        return ArrayCache
+    from .stateful import _ExportableRecurrentCache
+    return _ExportableRecurrentCache

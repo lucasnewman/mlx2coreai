@@ -40,7 +40,7 @@ def build_model(source, *, recipe, adapter, revision=None, compute_precision="fp
     inputs = build_mlx_lm_inputs(tokenizer=tokenizer, sequence_length=length)
     forward = _stateful_main_capture_function(model, layout=layout, input_name="input_ids",
         position_ids_name="position_ids", key_cache_name="keyCache", value_cache_name="valueCache",
-        cast_bf16_logits_to_fp16=True)
+        cast_bf16_logits_to_fp16=True, array_cache_factory=getattr(adapter, "ArrayCache", None))
     component = _stateful_component(model, lm_inputs=inputs, layout=layout,
         max_context_length=max_context_length, cache_dtype=cache_dtype, input_name="input_ids",
         position_ids_name="position_ids", position_length=offset + length, key_cache_name="keyCache",
