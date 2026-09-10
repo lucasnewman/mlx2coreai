@@ -1,5 +1,11 @@
 # Mimi Codec Conversion
 
+The implementation now lives in `recipes/mimi/`; `scripts/convert_mimi.py`
+remains the compatible conversion/validation command. The recipe also exposes
+`build(source)` and runtime `run(session, Request(...))`. See
+[recipe authoring](../recipes/README.md). Fresh migration validation bundles
+are under `artifacts/recipes/mimi_fp32`; prior assets are retained.
+
 ## Status
 
 Mimi's **offline FP32 encoder and decoder are validated** against mlx-audio.

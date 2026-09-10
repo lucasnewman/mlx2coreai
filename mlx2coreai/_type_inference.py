@@ -615,7 +615,7 @@ def infer_fill(node, input_specs):
 
 
 def infer_number_of_elements(node, input_specs):
-    return InferredTensorSpec(shape=tuple(), dtype="int32")
+    return InferredTensorSpec(shape=tuple(), dtype=_normalize_input_dtype(node.attrs.get("dtype", "int32")))
 
 
 def infer_arange(node, input_specs):

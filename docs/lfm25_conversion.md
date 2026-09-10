@@ -1,5 +1,10 @@
 # LFM2.5-2.6B Conversion
 
+The model-local build/run interface now lives in `recipes.lfm2`; see
+[language-model recipes](lm_recipes.md). It defaults to the validated FP32 path
+and packages its tokenizer with a dynamic stateful decoder. The original
+commands below remain compatible.
+
 ## Model and State
 
 The installed `mlx-lm` supports LFM2.5 through `mlx_lm.models.lfm2`; `mlx-vlm`

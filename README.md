@@ -7,12 +7,20 @@ Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) 
 
 See the [architecture and refactoring notes](docs/refactoring.md) for the
 conversion pipeline, extension points, and full-model correctness gates.
+See [model recipes](recipes/README.md) for the model-local build/run interface.
+Mimi, Pocket TTS, Qwen3, Qwen3.5, and LFM2/2.5 have recipes; adapters and
+execution policy live under `recipes/`, not in the conversion core.
 Post-refactor [Qwen and SmartTurn validation](docs/qwen_smart_turn_validation.md)
 records numerical results and the SmartTurn optimizer limitation.
 
 Mimi's offline FP32 encoder and decoder from mlx-audio also convert with dynamic
 sequence lengths. See [Mimi conversion](docs/mimi_conversion.md) for validated
 artifacts, reproduction commands, and the separate streaming work still needed.
+
+Pocket TTS from mlx-audio has a validated FP32 pipeline with mutable transformer
+KV caches and streaming audio-decoder convolution state. See
+[Pocket TTS conversion](docs/pocket_tts_conversion.md) for generation commands,
+parity results, performance, and the beta-runtime layer-partitioning workaround.
 
 ## Install
 
@@ -22,7 +30,20 @@ pip install mlx2coreai
 
 ## Convert an mlx-lm Model
 
-For autoregressive language models, use the stateful converter. It writes a
+For Qwen3, Qwen3.5, and LFM2/2.5, prefer the [language-model recipes](docs/lm_recipes.md):
+
+```bash
+python -m recipes.qwen3 convert --output artifacts/recipes/qwen3_fp32
+python -m recipes.qwen3 run artifacts/recipes/qwen3_fp32 --chat \
+  --prompt "What is the capital of France?" --max-new-tokens 32
+```
+
+They share dynamic stateful conversion and token generation, with model-local
+cache layouts and precision policy. Qwen3 and LFM default to FP32 for correctness;
+Qwen3.5 remains experimental. Recipe bundles use `manifest.json` and are run by
+their recipe, not the legacy sampling benchmark below.
+
+The original stateful converter remains compatible. It writes a
 bundle containing `metadata.json`, `tokenizer/`, and a nested `.aimodel`.
 Keep converted models in `artifacts/`, which is ignored by Git.
 

@@ -53,7 +53,7 @@ def _binary_canonical(seed: int) -> CoverageModelSpec:
 
 def _unary_canonical(seed: int) -> CoverageModelSpec:
     del seed
-    ops = ["exp", "log", "sqrt", "rsqrt", "sigmoid", "silu", "gelu", "tanh", "sin", "cos", "erf", "abs"]
+    ops = ["exp", "log", "sqrt", "square", "rsqrt", "sigmoid", "silu", "gelu", "tanh", "sin", "cos", "erf", "abs"]
     graph = Graph(
         inputs=[TensorSpec("x", (2, 3), "fp32")],
         nodes=[Node(op, ("x",), f"{op}_out") for op in ops],

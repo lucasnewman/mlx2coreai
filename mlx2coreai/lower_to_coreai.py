@@ -772,6 +772,10 @@ class CoreAILowerer:
     def _emit_unary(self, node: Node, *, fn: Callable) -> Value:
         return fn(self.env[node.inputs[0]])
 
+    def _emit_sqrt(self, node: Node) -> Value:
+        fn = coreai.rsqrt if node.attrs.get("inverted", False) else coreai.sqrt
+        return fn(self.env[node.inputs[0]])
+
     def _emit_negative(self, node: Node) -> Value:
         return coreai.broadcasting_mul(self.env[node.inputs[0]], -1.0)
 
@@ -858,8 +862,15 @@ class CoreAILowerer:
         return coreai.cast(self.env[node.inputs[0]], _element_type(dtype))
 
     def _emit_number_of_elements(self, node: Node) -> Value:
-        shape = coreai.cast(coreai.get_shape(self.env[node.inputs[0]]), IntegerType.get_signed(32))
-        return coreai.reduce_product(shape, [0])
+        x = self.env[node.inputs[0]]
+        axes = node.attrs.get("axes", list(range(_rank(x))))
+        dtype = _np_dtype_for_ir(node.attrs.get("dtype", "int32"))
+        count = coreai.constant(np.asarray(1, dtype=dtype))
+        for axis in axes:
+            count = coreai.broadcasting_mul(count, _dim_scalar_from_value(x, int(axis), dtype=dtype))
+        if node.attrs.get("inverted", False):
+            count = coreai.broadcasting_divide(coreai.constant(np.asarray(1, dtype=dtype)), count)
+        return count
 
     def _emit_fill(self, node: Node, *, op: str) -> Value:
         if op == "full" and len(node.inputs) == 1 and "shape" not in node.attrs and "value" not in node.attrs:

@@ -1,4 +1,4 @@
-"""Capture adapters for mlx-audio's Mimi codec (optional dependency)."""
+"""Model-local capture adaptations for mlx-audio's offline Mimi codec."""
 from __future__ import annotations
 
 

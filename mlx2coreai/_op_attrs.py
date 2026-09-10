@@ -19,6 +19,19 @@ def decode_addmm(op, arguments, output_shape, output_dtype):
             "beta": float(arguments[1]) if len(arguments) > 1 else 1.0}
 
 
+def decode_number_of_elements(op, arguments, output_shape, output_dtype):
+    result = {"dtype": output_dtype or "int32"}
+    if arguments:
+        result["axes"] = _int_list(arguments[0])
+    if len(arguments) > 1:
+        result["inverted"] = bool(arguments[1])
+    return result
+
+
+def decode_sqrt(op, arguments, output_shape, output_dtype):
+    return {"inverted": bool(arguments[0])} if arguments else {}
+
+
 def decode_reduce(op, arguments, output_shape, output_dtype):
     attrs: dict[str, Any] = {}
     if op == "reduce":

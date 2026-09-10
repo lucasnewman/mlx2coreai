@@ -1,5 +1,9 @@
 # Qwen3.5-0.8B Conversion Investigation
 
+The model-local build/run interface now lives in `recipes.qwen35`; see
+[language-model recipes](lm_recipes.md). The original commands below remain
+compatible, and the runtime limitations are unchanged.
+
 ## Status
 
 Conversion and CoreAI asset verification succeed. **Full-model numerical

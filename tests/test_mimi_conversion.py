@@ -5,15 +5,13 @@ import numpy as np
 import pytest
 
 from mlx2coreai import ConversionConfig, convert_mlx_to_coreai
-from mlx2coreai.mimi import offline_forward
+from recipes.mimi.adapter import offline_forward
 from mlx2coreai.runtime import run_aimodel_sync
 
 
-@pytest.mark.parametrize("component", ["encode", "decode"])
-def test_tiny_mimi_dynamic_lengths(tmp_path, component):
+def tiny_mimi():
     pytest.importorskip("mlx_audio")
     import mlx.core as mx
-    from coreai.runtime import SpecializationOptions
     from mlx_audio.codec.models.mimi.mimi import Mimi, mimi_202407
 
     mx.random.seed(67)
@@ -31,6 +29,15 @@ def test_tiny_mimi_dynamic_lengths(tmp_path, component):
             book.update_in_place()
     model.eval()
     mx.eval(model.parameters())
+    return model
+
+
+@pytest.mark.parametrize("component", ["encode", "decode"])
+def test_tiny_mimi_dynamic_lengths(tmp_path, component):
+    import mlx.core as mx
+    from coreai.runtime import SpecializationOptions
+
+    model = tiny_mimi()
     rng = np.random.default_rng(68)
     samples_per_frame = 8
     frames = (2, 3, 1, 5)
