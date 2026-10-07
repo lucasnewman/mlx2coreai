@@ -46,6 +46,7 @@ Each guide includes setup, build, run, and validation instructions.
 | [Mimi](recipes/mimi/README.md) | Offline audio encode/decode | FP32; not streaming |
 | [Pocket TTS](recipes/pocket_tts/README.md) | Stateful streaming speech generation | FP32; precomputed voices |
 | [SmartTurn v3](recipes/smart_turn/README.md) | Speech endpoint detection from mel features | FP32; dynamic batches; preprocessing outside asset |
+| [Parakeet Redux](recipes/parakeet_redux/README.md) | Offline speech recognition | FP32; dynamic mel length; ternary weights decompressed |
 
 ## Further Usage
 

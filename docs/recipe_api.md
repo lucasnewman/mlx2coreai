@@ -43,8 +43,10 @@ concurrent requests need independent sessions.
 
 Mimi returns a NumPy array per request, SmartTurn returns a dictionary of NumPy
 logits, probabilities, and predictions, language-model recipes yield token IDs,
-and Pocket TTS yields NumPy audio chunks. Language models and Pocket TTS accept
-an optional `report={}` argument to collect generation statistics when the
+Pocket TTS yields NumPy audio chunks, and Parakeet Redux returns a dictionary
+with text, token timestamps, and a completion flag. Language models, Parakeet
+Redux, and Pocket TTS accept an optional `report={}` argument to collect
+generation statistics when the
 request completes.
 
 Inspect `bundle.metadata.get("experimental")` before opening a session. Only

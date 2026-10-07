@@ -12,6 +12,7 @@ executes a request. Start with the guide for your model.
 | [Mimi](mimi/README.md) | Local Mimi codec checkpoint | Offline codes or audio arrays |
 | [Pocket TTS](pocket_tts/README.md) | `mlx-community/pocket-tts` | Streaming audio chunks |
 | [SmartTurn v3](smart_turn/README.md) | `mlx-community/smart-turn-v3` | Logits, probabilities, and endpoint decisions |
+| [Parakeet Redux](parakeet_redux/README.md) | `moondream/parakeet-redux` | Transcript and token timestamps |
 
 Each README covers dependencies, build/run examples, validation, and known
 limitations. LFM2 MoE instructions are in the LFM guide.
