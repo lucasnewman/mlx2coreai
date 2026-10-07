@@ -16,25 +16,26 @@ from .lower_to_coreai import (
     build_coreai_program,
     save_coreai_program,
 )
-from .op_registry import ensure_supported, unsupported_op_details
-from .passes import infer_graph_specs, normalize_graph, summarize_inference
+from .passes import AnalyzedGraph, analyze_graph, summarize_inference
+from .signature import CaptureSignature
 
 
 @dataclass(slots=True)
 class ConversionConfig:
-    capture_mode: str = "callback"
     allow_unknown_sources: bool = True
     capture_shapeless: bool = False
     dynamic_axes: DynamicAxes | None = None
     dynamic_probe_inputs: Mapping[str, Any] | None = None
     capture_is_training: bool = False
     optimize: bool = True
+    gated_delta_implementation: str = "native"
     entrypoint_name: str = "main"
     state_specs: list[StateSpec] | None = None
     externalize_weights: bool = True
     external_weight_threshold: int = 10
     min_runtime_target: str = "macOS27"
     constant_inputs: Mapping[str, Any] | None = None
+    signature: CaptureSignature | None = None
 
 
 @dataclass(slots=True)
@@ -52,6 +53,8 @@ class PreparedMLXGraph:
     inference_summary: dict[str, int]
     unsupported_details: list[dict[str, Any]]
     extra_input_names: list[str]
+    analysis: AnalyzedGraph | None = None
+    config: ConversionConfig | None = None
 
     @property
     def graph(self) -> Graph:
@@ -114,7 +117,6 @@ def capture_mlx_graph(
     inputs: Mapping[str, Any],
     *,
     dot_output_path: Path | None = None,
-    capture_mode: str = "callback",
     capture_shapeless: bool = False,
     allow_unknown_sources: bool = True,
     capture_is_training: bool = False,
@@ -128,7 +130,6 @@ def capture_mlx_graph(
             inputs=normalized_inputs,
             function=resolved_capture_function,
             allow_unknown_sources=allow_unknown_sources,
-            capture_mode=capture_mode,
             shapeless=capture_shapeless,
         )
     return CapturedMLXGraph(
@@ -152,7 +153,6 @@ def prepare_mlx_conversion(
         capture_target,
         inputs,
         dot_output_path=dot_output_path,
-        capture_mode=resolved.capture_mode,
         capture_shapeless=resolved.capture_shapeless,
         allow_unknown_sources=resolved.allow_unknown_sources,
         capture_is_training=resolved.capture_is_training,
@@ -165,7 +165,6 @@ def prepare_mlx_conversion(
                 capture_target,
                 resolved.dynamic_probe_inputs,
                 dot_output_path=None,
-                capture_mode=resolved.capture_mode,
                 capture_shapeless=resolved.capture_shapeless,
                 allow_unknown_sources=resolved.allow_unknown_sources,
                 capture_is_training=resolved.capture_is_training,
@@ -180,28 +179,32 @@ def prepare_mlx_conversion(
             )
         else:
             graph = apply_dynamic_axes(graph, resolved.dynamic_axes)
+    expected_outputs = captured.expected_outputs
+    if resolved.signature is not None:
+        graph, expected_outputs = resolved.signature.bind(graph, expected_outputs)
     captured = CapturedMLXGraph(
         graph=graph,
         normalized_inputs=captured.normalized_inputs,
-        expected_outputs=captured.expected_outputs,
+        expected_outputs=expected_outputs,
     )
-    normalized_graph = normalize_graph(captured.graph)
-    inference_summary = summarize_inference(infer_graph_specs(normalized_graph))
-    unsupported_details = unsupported_op_details(normalized_graph)
-    ensure_supported(normalized_graph)
+    analysis = analyze_graph(captured.graph)
+    normalized_graph = analysis.graph
+    inference_summary = summarize_inference(analysis.specs)
     extra_input_names = find_extra_input_names(normalized_graph, captured.normalized_inputs)
     return PreparedMLXGraph(
         captured=captured,
         normalized_graph=normalized_graph,
         expected_outputs=captured.expected_outputs,
         inference_summary=inference_summary,
-        unsupported_details=unsupported_details,
+        unsupported_details=[],
         extra_input_names=extra_input_names,
+        analysis=analysis,
+        config=resolved,
     )
 
 
 def lower_graph_to_coreai(
-    graph: Graph,
+    graph: Graph | AnalyzedGraph,
     *,
     config: ConversionConfig | None = None,
     public_input_names: set[str] | None = None,
@@ -212,7 +215,10 @@ def lower_graph_to_coreai(
         config=CoreAILoweringConfig(
             entrypoint_name=resolved.entrypoint_name,
             optimize=resolved.optimize,
-            state_specs=resolved.state_specs,
+            gated_delta_implementation=resolved.gated_delta_implementation,
+            state_specs=resolved.state_specs or (
+                [binding.spec for binding in resolved.signature.states] if resolved.signature else None
+            ),
             constant_inputs=resolved.constant_inputs,
             public_input_names=public_input_names,
             externalize_weights=resolved.externalize_weights,
@@ -238,8 +244,19 @@ def convert_mlx_to_coreai(
         dot_output_path=dot_output_path,
         capture_function=capture_function,
     )
+    return convert_prepared_mlx_to_coreai(prepared, config=resolved, output_path=output_path)
+
+
+def convert_prepared_mlx_to_coreai(
+    prepared: PreparedMLXGraph,
+    *,
+    config: ConversionConfig | None = None,
+    output_path: Path | None = None,
+) -> ConvertedCoreAIModel:
+    """Lower and optionally save a prepared graph, regardless of model adapter."""
+    resolved = config or prepared.config or ConversionConfig()
     lowered = lower_graph_to_coreai(
-        prepared.normalized_graph,
+        prepared.analysis or prepared.normalized_graph,
         config=resolved,
         public_input_names=set(prepared.normalized_inputs),
     )

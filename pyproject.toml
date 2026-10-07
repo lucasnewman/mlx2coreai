@@ -19,7 +19,7 @@ keywords = [
     "mlx",
 ]
 dependencies = [
-    "coreai-core==1.0.0b1",
+    "coreai-core==1.0.0b3",
     "ml-dtypes",
     "mlx",
     "mlx-lm",
@@ -33,14 +33,12 @@ test = [
 
 [project.scripts]
 mlx2coreai = "mlx2coreai.cli:main"
-mlx2coreai-convert-mlx-lm = "mlx2coreai._convert_mlx_lm:main"
-mlx2coreai-convert-mlx-lm-stateful = "mlx2coreai._convert_mlx_lm_stateful:main"
 
 [tool.setuptools]
 include-package-data = false
 
 [tool.setuptools.packages.find]
-include = ["mlx2coreai*"]
+include = ["mlx2coreai*", "recipes*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

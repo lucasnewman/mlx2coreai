@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +9,8 @@ from typing import Any, Mapping
 
 import ml_dtypes
 import numpy as np
+
+from .dtypes import runtime_numpy_dtype as _runtime_dtype_to_numpy
 
 
 class CoreAIRuntimeUnavailableError(RuntimeError):
@@ -64,6 +67,111 @@ def coreai_runtime_available() -> bool:
     return True
 
 
+class CoreAISession:
+    """An executable, one function, and reusable state buffers for serial calls.
+
+    Results stay as CoreAI NDArrays; callers decide when to read them back.
+    Use a separate session (or explicit state buffers) for independent sequences.
+    """
+
+    def __init__(
+        self, asset_or_path: Any, *, function_name: str = "main",
+        specialization_options: Any | None = None, storage_kind: Any | str | None = None,
+    ) -> None:
+        self.asset_or_path = asset_or_path
+        self.function_name = function_name
+        self.specialization_options = specialization_options
+        self.storage_kind = storage_kind
+        self.asset_path: Path | None = None
+        self.state: dict[str, Any] = {}
+        self._stack: AsyncExitStack | None = None
+        self._function: Any = None
+        self._asset: Any = None
+
+    async def __aenter__(self) -> CoreAISession:
+        if self._stack is not None:
+            raise RuntimeError("CoreAI session is already open.")
+        self._bindings = _load_coreai_runtime()
+        self._storage = _resolve_storage_kind(self.storage_kind, self._bindings.StorageKind)
+        asset, self.asset_path = _coerce_asset(self.asset_or_path, self._bindings.AIModelAsset)
+        stack = AsyncExitStack()
+        try:
+            executable = await stack.enter_async_context(
+                asset.executable(specialization_options=self.specialization_options)
+            )
+            self._function = executable.load_function(self.function_name)
+        except BaseException as exc:
+            await stack.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
+        self._asset = asset
+        self._stack = stack
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        stack, self._stack = self._stack, None
+        self._function = None
+        self.state = {}
+        try:
+            if stack is not None:
+                return await stack.__aexit__(exc_type, exc, tb)
+            return False
+        finally:
+            self._asset = None
+
+    @property
+    def function(self) -> Any:
+        if self._stack is None:
+            raise RuntimeError("CoreAI session must be used inside 'async with'.")
+        return self._function
+
+    def reset_state(self, *, state_capacity: int) -> dict[str, Any]:
+        self.state = allocate_state(
+            self.function, self._bindings.NDArray, state_capacity=state_capacity,
+            storage_kind=self._storage,
+        )
+        return self.state
+
+    def snapshot_state(self) -> dict[str, np.ndarray]:
+        self.function  # Check lifetime before reading runtime-owned buffers.
+        return {name: _output_to_numpy(value).copy() for name, value in self.state.items()}
+
+    def clone_state(self) -> dict[str, Any]:
+        return {
+            name: _to_ndarray(value, self._bindings.NDArray, self._storage)
+            for name, value in self.snapshot_state().items()
+        }
+
+    async def run(self, inputs: Mapping[str, Any], *, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        function = self.function
+        if state is None:
+            state = self.state or None
+        return await _call_function(function, self._bindings.NDArray, inputs, state, self._storage)
+
+
+async def _call_function(function, NDArray, inputs, state=None, storage_kind=None):
+    kwargs = {"inputs": {
+        name: _to_ndarray(value, NDArray, storage_kind) for name, value in inputs.items()
+    }}
+    if state is not None:
+        kwargs["state"] = state
+    return await function(**kwargs)
+
+
+def allocate_state(
+    function: Any, NDArray: Any, *, state_capacity: int, storage_kind: Any | None = None,
+) -> dict[str, Any]:
+    if state_capacity <= 0:
+        raise ValueError("State capacity must be positive.")
+    state = {}
+    for name in function.desc.state_names:
+        descriptor = function.desc.state_descriptor(name=name)
+        shape = tuple(state_capacity if dim is None or int(dim) < 0 else int(dim) for dim in descriptor.shape)
+        state[name] = _to_ndarray(
+            np.zeros(shape, dtype=_runtime_dtype_to_numpy(descriptor.dtype)), NDArray, storage_kind,
+        )
+    return state
+
+
 async def run_aimodel(
     asset_or_path: Any,
     inputs: Mapping[str, Any],
@@ -74,17 +182,11 @@ async def run_aimodel(
 ) -> CoreAIRuntimeOutputs:
     """Load and run a saved CoreAI .aimodel asset with coreai.runtime."""
 
-    bindings = _load_coreai_runtime()
-    asset, asset_path = _coerce_asset(asset_or_path, bindings.AIModelAsset)
-    resolved_storage_kind = _resolve_storage_kind(storage_kind, bindings.StorageKind)
-    nd_inputs = {
-        name: _to_ndarray(value, bindings.NDArray, resolved_storage_kind)
-        for name, value in inputs.items()
-    }
-
-    async with asset.executable(specialization_options=specialization_options) as ai_model:
-        function = ai_model.load_function(function_name)
-        raw_outputs = await function(inputs=nd_inputs)
+    async with CoreAISession(
+        asset_or_path, function_name=function_name,
+        specialization_options=specialization_options, storage_kind=storage_kind,
+    ) as session:
+        raw_outputs = await session.run(inputs)
 
     outputs = {
         str(name): _output_to_numpy(value)
@@ -93,7 +195,7 @@ async def run_aimodel(
     return CoreAIRuntimeOutputs(
         outputs=outputs,
         function_name=function_name,
-        asset_path=asset_path,
+        asset_path=session.asset_path,
         raw_outputs=raw_outputs,
     )
 
@@ -428,6 +530,8 @@ def _load_coreai_runtime() -> _CoreAIRuntimeBindings:
 def _coerce_asset(asset_or_path: Any, AIModelAsset: Any) -> tuple[Any, Path | None]:
     if isinstance(asset_or_path, str | Path):
         path = Path(asset_or_path)
+        if path.suffix != ".aimodel":
+            raise ValueError("Expected an explicit .aimodel asset path; use Bundle.open() for recipe bundles.")
         return AIModelAsset.load(path), path
     if not hasattr(asset_or_path, "executable"):
         raise TypeError(

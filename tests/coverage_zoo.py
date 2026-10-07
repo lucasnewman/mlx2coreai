@@ -53,7 +53,7 @@ def _binary_canonical(seed: int) -> CoverageModelSpec:
 
 def _unary_canonical(seed: int) -> CoverageModelSpec:
     del seed
-    ops = ["exp", "log", "sqrt", "rsqrt", "sigmoid", "silu", "gelu", "tanh", "sin", "cos", "erf", "abs"]
+    ops = ["exp", "log", "sqrt", "square", "rsqrt", "sigmoid", "silu", "gelu", "tanh", "sin", "cos", "erf", "abs"]
     graph = Graph(
         inputs=[TensorSpec("x", (2, 3), "fp32")],
         nodes=[Node(op, ("x",), f"{op}_out") for op in ops],
@@ -79,6 +79,7 @@ def _shape_index(seed: int) -> CoverageModelSpec:
             Node("expand_dims", ("b",), "expand_out", attrs={"axes": [0]}),
             Node("squeeze", ("s",), "squeeze_out", attrs={"axes": [0, 2]}),
             Node("broadcast_to", ("b",), "broadcast_out", attrs={"shape": [2, 3]}),
+            Node("broadcast_axes", ("b", "x"), "broadcast_axes_out", attrs={"ignore_axes": [-2, -1]}),
             Node("slice_by_index", ("x",), "slice_out", attrs={"begin": [0, 0, 0], "end": [2, 2, 4], "stride": [1, 1, 1]}),
             Node("slice_update", ("x", "update"), "slice_update_out", attrs={"begin": [0, 0, 0], "end": [2, 2, 4], "stride": [1, 1, 1]}),
             Node("dynamic_slice_update", ("x", "update", "start"), "dynamic_slice_update_out", attrs={"axes": [0, 1, 2]}),
@@ -92,6 +93,7 @@ def _shape_index(seed: int) -> CoverageModelSpec:
             "expand_out",
             "squeeze_out",
             "broadcast_out",
+            "broadcast_axes_out",
             "slice_out",
             "slice_update_out",
             "dynamic_slice_update_out",
@@ -277,7 +279,109 @@ def _aliases_and_bitwise(seed: int) -> CoverageModelSpec:
     return CoverageModelSpec("supplemental_aliases_and_bitwise", "Alias spellings and bitwise binary", graph)
 
 
+def _gated_delta(seed: int) -> CoverageModelSpec:
+    names = ("q", "k", "v", "decay", "beta", "state")
+    shapes = [(1, -1, 2, 32)] * 3 + [(1, -1, 2)] * 2 + [(1, 2, 32, 32)]
+    graph = Graph(
+        [TensorSpec(name, shape, "fp32") for name, shape in zip(names, shapes, strict=True)],
+        [Node("gated_delta_update", names, "y", attrs={"output_index": 0}),
+         Node("gated_delta_update", names, "s", attrs={"output_index": 1})],
+        ["y", "s"],
+    )
+    return CoverageModelSpec("supplemental_gated_delta", "Experimental dynamic gated-delta composite", graph)
+
+
+def _extended_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    unary = ['floor', 'ceil', 'round', 'sign', 'trunc', 'arccosh', 'arcsinh', 'cosh', 'sinh', 'tan']
+    nodes = [Node(op, ('x',), op + '_out') for op in unary]
+    nodes.extend(Node(op, ('p', 'q'), op + '_out') for op in ['logical_and', 'logicaland', 'logical_or', 'logicalor'])
+    nodes.extend(Node(op, ('p',), op + '_out') for op in ['logical_not', 'logicalnot'])
+    nodes += [
+        Node('arctan2', ('x', 'x'), 'atan2_out'),
+        Node('gatheraxis', ('x', 'i'), 'gather_axis_out', attrs={'axis': 1}),
+        Node('scan', ('x',), 'scan_out', attrs={'axis': 1, 'mode': 2, 'inclusive': False, 'reverse': True}),
+        Node('scatteraxis', ('x', 'i', 'x'), 'scatter_axis_out', attrs={'axis': 1, 'mode': 'update'}),
+        Node('scatter', ('x', 'j', 'u'), 'scatter_out', attrs={'axes': [0], 'mode': 'add'}),
+    ]
+    nodes.extend(Node(op, ('x',), op + '_out', attrs={'axis': 1, 'kth': 1})
+                 for op in ['sort', 'argsort', 'partition', 'argpartition'])
+    nodes.extend(Node(op, ('a', 'b', 'j', 'j'), op + '_out') for op in ['gathermm', 'gather_mm'])
+    nodes.extend(Node(op, ('x',), op + '_out', attrs={'shape': [2, 2], 'strides': [3, 1], 'offset': 0})
+                 for op in ['asstrided', 'as_strided'])
+    graph = Graph([
+        TensorSpec('x', (2, 3), 'fp32'), TensorSpec('p', (2, 3), 'bool'), TensorSpec('q', (2, 3), 'bool'),
+        TensorSpec('i', (2, 3), 'int32'), TensorSpec('j', (2,), 'int32'), TensorSpec('u', (2, 1, 3), 'fp32'),
+        TensorSpec('a', (2, 3, 4), 'fp32'), TensorSpec('b', (2, 4, 3), 'fp32'),
+    ], nodes, [node.output for node in nodes])
+    return CoverageModelSpec('supplemental_extended_ops', 'Elementwise, scan, selection and window indexing', graph)
+
+
+def _complex_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    nodes = [Node(op, ('x',), op + '_out') for op in ['real', 'imag', 'conjugate']]
+    nodes.append(Node('view', ('x',), 'view_out', attrs={'dtype': 'fp32'}))
+    nodes.extend(Node(op, ('a', 'b'), op + '_out') for op in ['complex', 'polar'])
+    return CoverageModelSpec('supplemental_complex_ops', 'Complex components, conjugation and storage views',
+        Graph([TensorSpec('x', (2, 3), 'complex64'), TensorSpec('a', (2, 1), 'fp32'), TensorSpec('b', (1, 3), 'fp32')],
+              nodes, [node.output for node in nodes]))
+
+
+def _data_dependent_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    graph = Graph([TensorSpec('x', (2, 3), 'fp32'), TensorSpec('mask', (2, 3), 'bool'), TensorSpec('source', (6,), 'fp32')],
+        [Node('nonzero', ('x',), 'indices'), Node('masked_scatter', ('x', 'mask', 'source'), 'updated')],
+        ['indices', 'updated'])
+    return CoverageModelSpec('supplemental_data_dependent_ops', 'Nonzero and masked scatter', graph)
+
+
+def _control_flow_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    inputs = [TensorSpec('x', (), 'int32'), TensorSpec('limit', (), 'int32')]
+    condition = Graph(inputs, [Node('less', ('x', 'limit'), 'test')], ['test'])
+    body = Graph(inputs, [Node('constant', (), 'one', {'value': np.array(1, np.int32)}),
+        Node('add', ('x', 'one'), 'next')], ['next'])
+    branch = Graph(inputs, [], ['x'])
+    graph = Graph([TensorSpec('predicate', (), 'bool'), *inputs], [
+        Node('cond', ('predicate', 'x', 'limit'), 'selected', {'then': branch, 'else': branch}),
+        Node('while_loop', ('selected', 'limit'), 'out', {'condition': condition, 'body': body, 'carried_count': 1}),
+    ], ['out'])
+    return CoverageModelSpec('supplemental_control_flow', 'Explicit conditional and loop subgraphs', graph)
+
+
+def _compression_ops(seed: int) -> CoverageModelSpec:
+    del seed
+    nodes = [
+        Node('constant', (), 'scale', {'value': np.array(0.5, np.float32)}),
+        Node('constant', (), 'offset', {'value': np.array(1, np.int8)}),
+        Node('constant', (), 'bias', {'value': np.array(0, np.float32)}),
+        Node('affine_quantize', ('x', 'scale', 'offset', 'bias'), 'q'),
+        Node('affine_dequantize', ('q', 'scale', 'offset', 'bias'), 'dequantized'),
+        Node('constant', (), 'block_scale', {'value': np.array([[0.5]], np.float32)}),
+        Node('constant', (), 'block_offset', {'value': np.array([[0]], np.int8)}),
+        Node('constant', (), 'block_bias', {'value': np.array([[0]], np.float32)}),
+        Node('blockwise_shift_scale', ('q', 'block_scale', 'block_offset', 'block_bias'), 'blockwise'),
+        Node('constant', (), 'indices', {'value': np.array([[0, 1, 2], [3, 2, 1]], np.uint8), 'dtype': 'uint2'}),
+        Node('constant', (), 'table', {'value': np.arange(4, dtype=np.float32).reshape(1, 1, 4, 1)}),
+        Node('lut_to_dense', ('indices', 'table'), 'palettized'),
+        Node('constant', (), 'mask', {'value': np.array([[0, 1, 0], [1, 0, 0]], np.uint8), 'dtype': 'uint1'}),
+        Node('constant', (), 'nonzero', {'value': np.array([1, 2], np.float32)}),
+        Node('sparse_to_dense', ('nonzero', 'mask'), 'sparse'),
+    ]
+    return CoverageModelSpec('supplemental_compression', 'Affine, blockwise, LUT and sparse compression',
+        Graph([TensorSpec('x', (2, 3), 'fp32')], nodes, ['dequantized', 'blockwise', 'palettized', 'sparse']))
+
+
 _BUILDERS: dict[str, Callable[[int], CoverageModelSpec]] = {
+    "supplemental_adaptive_pooling": lambda seed: CoverageModelSpec('supplemental_adaptive_pooling',
+        'Adaptive average pooling', Graph([TensorSpec('x', (2, 5, 6, 3), 'fp32')],
+            [Node('adaptive_avg_pool', ('x',), 'out', {'output_size': [2, 3]})], ['out'])),
+    "supplemental_compression": _compression_ops,
+    "supplemental_control_flow": _control_flow_ops,
+    "supplemental_extended_ops": _extended_ops,
+    "supplemental_complex_ops": _complex_ops,
+    "supplemental_data_dependent_ops": _data_dependent_ops,
+    "supplemental_gated_delta": _gated_delta,
     "supplemental_aliases_and_bitwise": _aliases_and_bitwise,
     "supplemental_binary_canonical": _binary_canonical,
     "supplemental_unary_canonical": _unary_canonical,

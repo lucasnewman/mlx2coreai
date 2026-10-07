@@ -2,8 +2,12 @@
 
 Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) conversion.
 
-`mlx2coreai` captures MLX graphs, lowers supported ops to CoreAI MLIR, and writes
-`.aimodel` assets or coreai-models-style LLM bundles.
+Capture MLX graphs, lower supported ops to CoreAI, and build executable
+`.aimodel` assets. Model recipes package conversion, tokenizers, state, and
+execution into a reusable bundle.
+
+This project uses a beta SDK. Start with a validated recipe; successful export
+alone does not guarantee correct execution.
 
 ## Install
 
@@ -11,76 +15,41 @@ Experimental MLX to [CoreAI](https://developer.apple.com/documentation/coreai/) 
 pip install mlx2coreai
 ```
 
-## Convert an mlx-lm Model
+Requires Python 3.11+. GPU-preferred execution requires macOS 27 and compatible
+CoreAI developer tools. To use the scripts and recipes from this checkout,
+run `pip install -e .` from the repository root. Audio recipes list their
+additional dependencies in their own guides.
 
-For autoregressive language models, use the stateful converter. It writes a
-bundle containing `metadata.json`, `tokenizer/`, and a nested `.aimodel`.
+## Quick Start
 
-```bash
-mlx2coreai convert-mlx-lm-stateful mlx-community/Qwen3-0.6B-bf16 \
-  --output qwen \
-  --max-context-length 256
-```
-
-The exported model has one `main` entrypoint with `input_ids`, `position_ids`,
-and mutable `keyCache` / `valueCache` state.
-
-## Benchmark Sampling
+Build the default Qwen3-0.6B checkpoint and generate text:
 
 ```bash
-python scripts/benchmark_aimodel_sampling.py qwen \
-  --contexts 16,32,64,128,256 \
-  --steps 16 \
-  --decode
+python -m recipes.qwen3 convert --output artifacts/recipes/qwen3_fp32
+python -m recipes.qwen3 run artifacts/recipes/qwen3_fp32 --chat \
+  --prompt "What is the capital of France?" --max-new-tokens 32
 ```
 
-The benchmark accepts either the bundle directory (`qwen`) or the nested asset
-path (`qwen/qwen.aimodel`). It uses the embedded tokenizer when present.
+Missing weights are downloaded during conversion. Keep generated bundles in
+the git-ignored `artifacts/` directory. See the [Qwen3 guide](recipes/qwen3/README.md)
+for validation and configuration.
 
-## Convert a Generic MLX Function
+## Model Recipes
 
-```python
-import mlx.core as mx
-import numpy as np
+Each guide includes setup, build, run, and validation instructions.
 
-from mlx2coreai import ConversionConfig, convert_mlx_to_coreai
+| Recipe | What it does | Compatibility |
+| --- | --- | --- |
+| [Qwen3](recipes/qwen3/README.md) | Stateful text generation | Default 0.6B checkpoint validated in FP32 |
+| [Qwen3.5](recipes/qwen35/README.md) | Hybrid text decoder | Experimental; use FP32 with decomposed recurrence |
+| [LFM2 / LFM2.5](recipes/lfm2/README.md) | Dense and MoE text generation | LFM2.5 FP32 with byte-backed state; MoE experimental |
+| [Mimi](recipes/mimi/README.md) | Offline audio encode/decode | FP32; not streaming |
+| [Pocket TTS](recipes/pocket_tts/README.md) | Stateful streaming speech generation | FP32; precomputed voices |
+| [SmartTurn v3](recipes/smart_turn/README.md) | Speech endpoint detection from mel features | FP32; dynamic batches; preprocessing outside asset |
 
+## Further Usage
 
-def model(x, w):
-    return mx.tanh(mx.matmul(x, w))
-
-
-converted = convert_mlx_to_coreai(
-    model,
-    {
-        "x": np.ones((2, 3), dtype=np.float32),
-        "w": np.ones((3, 4), dtype=np.float32),
-    },
-    config=ConversionConfig(optimize=True),
-    output_path="model.aimodel",
-)
-
-print(converted.asset_path)
-```
-
-## Run an Asset
-
-When the local CoreAI runtime is available:
-
-```python
-import asyncio
-import numpy as np
-
-from mlx2coreai import run_aimodel
-
-
-async def main():
-    result = await run_aimodel(
-        "model.aimodel",
-        {"x": np.ones((2, 3), dtype=np.float32)},
-    )
-    print(result.outputs)
-
-
-asyncio.run(main())
-```
+- [Recipe overview](recipes/README.md): the shared build/run interface and where to start.
+- [Language-model options](docs/lm_recipes.md): sampling, dynamic state, Python generation, and validation.
+- [Recipe API](docs/recipe_api.md): build/load bundles, manage sessions, and create a recipe.
+- [Generic conversion and execution](docs/conversion.md): convert an MLX function or run an asset directly.

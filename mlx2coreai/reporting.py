@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .ir import Graph
+
 REPORT_SCHEMA_VERSION = "mlx2coreai.run_report.v1"
 
 
@@ -75,3 +77,23 @@ def summarize_stage_timings(
 
 def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def write_graph_dot(path: Path, graph: Graph) -> None:
+    """Render the IR without re-executing its operations in another framework."""
+    graph.validate()
+    lines = ["digraph {"]
+    lines.extend(f"  {{rank=source; {json.dumps(spec.name)};}}" for spec in graph.inputs)
+    lines.extend(f"  {{rank=sink; {json.dumps(name)};}}" for name in graph.outputs)
+    tensor_names = {spec.name for spec in graph.inputs} | {name for node in graph.nodes for name in node.outputs}
+    index = 0
+    for node in graph.nodes:
+        while str(index) in tensor_names:
+            index += 1
+        lines.append(f"  {{ {index} [label={json.dumps(node.op)}, shape=rectangle]; }}")
+        lines.extend(f"  {json.dumps(name)} -> {index};" for name in node.inputs)
+        lines.extend(f"  {index} -> {json.dumps(name)};" for name in node.outputs)
+        index += 1
+    lines.append("}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

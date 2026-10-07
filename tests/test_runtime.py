@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import ml_dtypes
+import pytest
 
 from mlx2coreai import (
     compare_coreai_outputs,
@@ -194,3 +195,88 @@ def test_validate_aimodel_outputs_sync(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.passed
+
+
+def test_session_reuses_function_and_isolates_state(monkeypatch, tmp_path):
+    calls = _install_fake_runtime(monkeypatch)
+    loaded, closed = [], []
+
+    class StatefulFunction:
+        desc = SimpleNamespace(
+            state_names=["cache"],
+            state_descriptor=lambda name: SimpleNamespace(shape=(1, -1), dtype="float32"),
+        )
+
+        async def __call__(self, *, inputs, state):
+            calls.setdefault("states", []).append(state)
+            state["cache"].data += 1
+            return {"logits": inputs["input_ids"]}
+
+    def load_function(self, name):
+        loaded.append(name)
+        return StatefulFunction()
+
+    async def close(self, *exc):
+        closed.append(exc)
+
+    monkeypatch.setattr(FakeModel, "load_function", load_function)
+    monkeypatch.setattr(FakeExecutable, "__aexit__", close)
+
+    async def check():
+        session = runtime.CoreAISession(tmp_path / "model.aimodel", storage_kind="metal")
+        with pytest.raises(RuntimeError, match="async with"):
+            await session.run({})
+        async with session:
+            with pytest.raises(RuntimeError, match="already open"):
+                await session.__aenter__()
+            state = session.reset_state(state_capacity=4)
+            assert state["cache"].backing is FakeStorageKind.METAL
+            snapshot = session.snapshot_state()
+            clone = session.clone_state()
+            for buffers in (None, clone, None):
+                await session.run({"input_ids": np.array([[7]], np.int32),
+                                   "position_ids": np.array([[0]], np.int32)}, state=buffers)
+            np.testing.assert_array_equal(snapshot["cache"], [[0] * 4])
+            np.testing.assert_array_equal(clone["cache"].numpy(), [[1] * 4])
+            np.testing.assert_array_equal(state["cache"].numpy(), [[2] * 4])
+            assert calls["states"][0] is calls["states"][2] is state
+            assert session.reset_state(state_capacity=2)["cache"].numpy().shape == (1, 2)
+        assert session.state == {}
+        with pytest.raises(RuntimeError, match="async with"):
+            session.snapshot_state()
+        assert len(loaded) == len(closed) == 1
+
+    asyncio.run(check())
+
+
+def test_session_closes_executable_if_function_load_fails(monkeypatch, tmp_path):
+    _install_fake_runtime(monkeypatch)
+    closed = []
+
+    def load_function(self, name):
+        raise ValueError("missing function")
+
+    async def close(self, exc_type, exc, tb):
+        closed.append(exc)
+
+    monkeypatch.setattr(FakeModel, "load_function", load_function)
+    monkeypatch.setattr(FakeExecutable, "__aexit__", close)
+
+    async def check():
+        async with runtime.CoreAISession(tmp_path / "model.aimodel"):
+            pytest.fail("must not enter")
+
+    with pytest.raises(ValueError, match="missing function"):
+        asyncio.run(check())
+    assert len(closed) == 1
+    assert isinstance(closed[0], ValueError)
+
+
+@pytest.mark.parametrize("nested_asset", [False, True])
+def test_runtime_requires_explicit_asset_path(monkeypatch, tmp_path, nested_asset):
+    calls = _install_fake_runtime(monkeypatch)
+    if nested_asset:
+        (tmp_path / "main.aimodel").mkdir()
+    with pytest.raises(ValueError, match="explicit .aimodel asset path"):
+        run_aimodel_sync(tmp_path, {"x": [1.0]})
+    assert "loaded_path" not in calls
