@@ -34,8 +34,10 @@ async def validate(args):
         tokens = [asdict(token) for sentence in result.sentences for token in sentence.tokens]
         references.append((np.asarray(encoded), np.asarray(lengths), result.text, tokens))
         print(f"MLX reference {name}: {result.text!r}", flush=True)
-    bundle = export(from_model(model, args.model, revision=args.revision, frames=tuple(args.frames)), args.output)
+    bundle = export(from_model(model, args.model, revision=args.revision, frames=tuple(args.frames),
+                               weight_format=args.weight_format), args.output)
     report = {"model": args.model, "mlx_enable_tf32": "0", "atol": args.atol, "rtol": args.rtol,
+              "weight_format": args.weight_format,
               "conversion": bundle.manifest["components"], "results": [], "decoder": {}}
 
     def compare(name, actual, expected, stats):

@@ -20,12 +20,17 @@ limitations. LFM2 MoE instructions are in the LFM guide.
 ## Shared Conventions
 
 Run shell examples from the repository root. Keep generated bundles in
-`artifacts/`, which is ignored by Git. Recipe bundles use `manifest.json`
+`artifacts/`, which is ignored by Git. Recipe bundles use `manifest.json` or a runtime-only `config.json`
 and are executed through their recipe.
 
 Build settings describe the checkpoint and conversion policy. Requests carry
 runtime inputs, sampling settings, and generation budgets. Opening a bundle
 does not reload the source checkpoint.
+
+All recipes can opt into the shared 4/8-bit FP32 linear-weight quantizer through
+`export(..., quantization=WeightQuantization(...))`; see the
+[weight quantization API](../docs/recipe_api.md#weight-quantization) for coverage
+reports and checkpoint preservation. Quality must be evaluated per model.
 
 Use sessions as async context managers. Stateful recipes reset buffers for
 each request and preserve them across generation steps; requests in one

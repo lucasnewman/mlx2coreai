@@ -47,9 +47,10 @@ async def transcribe(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    convert = commands.add_parser("convert", help="Build encoder and TDT decoder assets.")
+    convert = commands.add_parser("convert", help="Build one encoder/TDT decoder package and runtime config.")
     convert.add_argument("source", nargs="?", default=DEFAULT_SOURCE)
     convert.add_argument("--revision")
+    convert.add_argument("--weight-format", choices=("fp32", "uint2", "uint4", "uint8"), default="fp32")
     convert.add_argument("--output", type=Path, required=True)
     convert.add_argument("--frames", type=int, nargs=2, default=(32, 49), metavar=("CAPTURE", "PROBE"))
     generate = commands.add_parser("run", help="Transcribe audio or prepared mel features.")
@@ -62,19 +63,33 @@ def main(argv=None):
     validate = commands.add_parser("validate", help="Build and compare features, steps, transcripts, and timestamps against MLX.")
     validate.add_argument("--model", default=DEFAULT_SOURCE)
     validate.add_argument("--revision")
+    validate.add_argument("--weight-format", choices=("fp32", "uint2", "uint4", "uint8"), default="fp32")
     validate.add_argument("--output", type=Path, required=True)
     validate.add_argument("--frames", type=int, nargs=2, default=(32, 49))
     validate.add_argument("--audio", type=Path, nargs="*", default=[])
     validate.add_argument("--atol", type=float, default=1e-3)
     validate.add_argument("--rtol", type=float, default=1e-3)
+    compare = commands.add_parser("compare", help="Compare an existing candidate bundle directly against FP32.")
+    compare.add_argument("reference", type=Path)
+    compare.add_argument("candidate", type=Path)
+    compare.add_argument("--audio", type=Path, nargs="*", default=[])
+    compare.add_argument("--mel", type=Path, nargs="*", default=[])
+    compare.add_argument("--output", type=Path, required=True)
+    compare.add_argument("--atol", type=float, default=1e-4)
+    compare.add_argument("--rtol", type=float, default=1e-4)
     args = parser.parse_args(argv)
     if args.command == "convert":
-        export(build(args.source, revision=args.revision, frames=tuple(args.frames)), args.output)
+        export(build(args.source, revision=args.revision, frames=tuple(args.frames),
+                     weight_format=args.weight_format), args.output)
     elif args.command == "run":
         asyncio.run(transcribe(args))
     else:
         if not np.isfinite([args.atol, args.rtol]).all() or args.atol <= 0 or args.rtol <= 0:
             parser.error("atol and rtol must be finite and positive")
-        os.environ["MLX_ENABLE_TF32"] = "0"
-        from .validation import validate as validate_model
-        asyncio.run(validate_model(args))
+        if args.command == "compare":
+            from .comparison import compare as compare_bundles
+            asyncio.run(compare_bundles(args))
+        else:
+            os.environ["MLX_ENABLE_TF32"] = "0"
+            from .validation import validate as validate_model
+            asyncio.run(validate_model(args))

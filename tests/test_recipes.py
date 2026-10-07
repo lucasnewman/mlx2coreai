@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import replace
 from io import BytesIO
+import json
 import subprocess
 import sys
 
@@ -84,6 +85,39 @@ def test_state_binding_not_last_output(tmp_path):
                     result = await session.run("main", {"x": np.ones(1, np.float32)}, readback=True)
                     np.testing.assert_array_equal(result["doubled"], [i * 2])
                     np.testing.assert_array_equal(session.snapshot_state("main")["total"], [i])
+    asyncio.run(check())
+
+
+def test_combined_config_replaces_legacy_assets(tmp_path):
+    from coreai.runtime import SpecializationOptions
+
+    first = Component(lambda x: x + np.arange(16, dtype=np.float32),
+                      {"x": np.zeros(16, np.float32)}, ("result",),
+                      ConversionConfig(optimize=False, entrypoint_name="encode"))
+    second = Component(lambda x: x * (np.arange(16, dtype=np.float32) + 2),
+                       first.inputs, ("result",),
+                       ConversionConfig(optimize=False, entrypoint_name="decode"))
+    plan = Build("test", {"encoder": first, "decoder": second}, metadata={"source": "/absolute/source"})
+    output = tmp_path / "bundle"
+    export(plan, output)
+    plan.asset_name = "model.aimodel"
+    plan.runtime_metadata = {"width": 16}
+    with pytest.raises(ValueError, match="all components"):
+        export(plan, output, only=["encoder"])
+    bundle = export(plan, output)
+    assert not (output / "manifest.json").exists()
+    assert sorted(path.name for path in output.iterdir()) == ["config.json", "model.aimodel"]
+    config = json.loads((output / "config.json").read_text())
+    assert config["metadata"] == {"width": 16}
+    assert all(set(entry) == {"entrypoint", "outputs"} for entry in config["components"].values())
+
+    async def check():
+        async with bundle.session(specialization_options=SpecializationOptions.cpu_only()) as session:
+            encoded = await session.run("encoder", first.inputs, readback=True)
+            decoded = await session.run("decoder", {"x": encoded["result"]}, readback=True)
+            np.testing.assert_array_equal(encoded["result"], np.arange(16, dtype=np.float32))
+            np.testing.assert_array_equal(decoded["result"], np.arange(16) * (np.arange(16) + 2))
+
     asyncio.run(check())
 
 

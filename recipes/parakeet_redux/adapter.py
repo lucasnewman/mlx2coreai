@@ -1,30 +1,16 @@
 """Capture adaptations for the mlx-audio Redux encoder and one TDT step."""
 
 
-def prepare_model(model):
+def prepare_model(model, *, preserve_quantization=False):
     """Materialize losslessly dequantized ternary weights before capture."""
     import mlx.core as mx
-    import mlx.nn as nn
-    from mlx.utils import tree_unflatten
+    from mlx2coreai import prepare_quantized_linears
 
     model.eval()
     model.set_dtype(mx.float32)
-    replacements = []
-    for name, module in model.named_modules():
-        if isinstance(module, nn.QuantizedLinear):
-            if module.bits != 2 or module.group_size != 128:
-                raise ValueError("Redux requires affine 2-bit weights with group size 128.")
-            weight = mx.dequantize(module.weight, module.scales, module.biases,
-                                   group_size=128, bits=2).astype(mx.float32)
-            dense = nn.Linear(weight.shape[1], weight.shape[0], bias="bias" in module)
-            dense.weight = weight
-            if "bias" in module:
-                dense.bias = module.bias
-            mx.eval(dense.parameters())
-            replacements.append((name, dense))
-    model.update_modules(tree_unflatten(replacements))
+    packed = prepare_quantized_linears(model, preserve=preserve_quantization, require_all=True)
     mx.eval(model.parameters())
-    return len(replacements)
+    return packed
 
 
 def encode(model, mel, lengths, pos_emb, positions):

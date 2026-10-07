@@ -46,11 +46,12 @@ Each guide includes setup, build, run, and validation instructions.
 | [Mimi](recipes/mimi/README.md) | Offline audio encode/decode | FP32; not streaming |
 | [Pocket TTS](recipes/pocket_tts/README.md) | Stateful streaming speech generation | FP32; precomputed voices |
 | [SmartTurn v3](recipes/smart_turn/README.md) | Speech endpoint detection from mel features | FP32; dynamic batches; preprocessing outside asset |
-| [Parakeet Redux](recipes/parakeet_redux/README.md) | Offline speech recognition | FP32; dynamic mel length; ternary weights decompressed |
+| [Parakeet Redux](recipes/parakeet_redux/README.md) | Offline speech recognition | FP32 computation; optional packed uint2 weights; dynamic mel length |
 
 ## Further Usage
 
 - [Recipe overview](recipes/README.md): the shared build/run interface and where to start.
 - [Language-model options](docs/lm_recipes.md): sampling, dynamic state, Python generation, and validation.
 - [Recipe API](docs/recipe_api.md): build/load bundles, manage sessions, and create a recipe.
+- [Weight quantization](docs/recipe_api.md#weight-quantization): shared 4/8-bit linear-weight exports and packed MLX checkpoint preservation.
 - [Generic conversion and execution](docs/conversion.md): convert an MLX function or run an asset directly.

@@ -16,6 +16,7 @@ from .conversion import (
 )
 from .ir import Graph, Node, StateSpec, TensorSpec, TensorType
 from .signature import CaptureSignature, StateBinding
+from .quantization import WeightQuantization, PackedLinearWeights, prepare_quantized_linears
 from .runtime import (
     CoreAIOutputComparison,
     CoreAIRuntimeOutputs,
@@ -49,6 +50,9 @@ __all__ = [
     "Graph",
     "Node",
     "PreparedMLXGraph",
+    "WeightQuantization",
+    "PackedLinearWeights",
+    "prepare_quantized_linears",
     "StateSpec",
     "StateBinding",
     "TensorSpec",

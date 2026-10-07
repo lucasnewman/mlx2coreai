@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mlx2coreai import ConversionConfig
+from mlx2coreai import ConversionConfig, WeightQuantization
 from mlx2coreai.recipe import Build, Component
 from .adapter import prepare_model, encode, decode_step
 from .runtime import encoder_inputs
@@ -27,7 +27,9 @@ def load_source(source, *, revision=None):
     return model
 
 
-def from_model(model, source, *, revision=None, frames=(32, 49)):
+def from_model(model, source, *, revision=None, frames=(32, 49), weight_format="fp32"):
+    if weight_format not in ("fp32", "uint2", "uint4", "uint8"):
+        raise ValueError("weight_format must be fp32, uint2, uint4, or uint8.")
     if (len(frames) != 2 or any(type(n) is not int or n < 3 for n in frames)
             or frames[0] == frames[1]):
         raise ValueError("Capture and probe require two different mel frame counts >= 3.")
@@ -43,7 +45,13 @@ def from_model(model, source, *, revision=None, frames=(32, 49)):
         raise ValueError("Capture/probe need one frame count divisible by subsampling_factor and one with remainder 1.")
     if (frames[0] + factor - 1) // factor == (frames[1] + factor - 1) // factor:
         raise ValueError("Capture and probe must have different subsampled frame counts.")
-    quantized_modules = prepare_model(model)
+    prepared_weights = prepare_model(model, preserve_quantization=weight_format == "uint2")
+    quantized_modules = prepared_weights.module_count
+    packed_weights = prepared_weights if weight_format == "uint2" else None
+    if packed_weights is not None and (not packed_weights.weights or
+                                      any(w.bits != 2 for w in packed_weights.weights.values())):
+        raise ValueError("uint2 export requires a source model with packed 2-bit modules.")
+    quantization = WeightQuantization(bits=int(weight_format[-1])) if weight_format in ("uint4", "uint8") else None
     rnn = model.decoder.prediction["dec_rnn"]
     metadata = {
         "source": str(Path(source).resolve()) if Path(source).is_dir() else str(source),
@@ -55,8 +63,11 @@ def from_model(model, source, *, revision=None, frames=(32, 49)):
         "frame_seconds": factor * model.preprocessor_config.hop_length / model.preprocessor_config.sample_rate,
         "dynamic_frames": True, "streaming": False,
         "quantized_modules_decompressed": quantized_modules,
+        "weight_format": weight_format,
+        "quantized_modules_packed": quantized_modules if packed_weights is not None else 0,
         "preprocessing": "mlx-audio log_mel_spectrogram outside the CoreAI assets",
-        "workarounds": ["ternary weights losslessly decompressed to FP32 before capture",
+        "workarounds": ["ternary weights losslessly decompressed to FP32 for capture"
+                        + (" and restored to uint2 constants in the asset" if packed_weights else ""),
                         "relative positional embeddings supplied by the recipe runtime",
                         "authoring optimization disabled"],
     }
@@ -75,9 +86,10 @@ def from_model(model, source, *, revision=None, frames=(32, 49)):
         "encoder": Component(
             lambda mel, lengths, pos_emb, positions: encode(model, mel, lengths, pos_emb, positions),
             example(frames[0]), ("features", "lengths"),
-            ConversionConfig(optimize=False, capture_shapeless=True,
+            ConversionConfig(entrypoint_name="encode", optimize=False, capture_shapeless=True,
                              dynamic_axes={"mel": [1], "pos_emb": [1], "positions": [1]},
-                             dynamic_probe_inputs=example(frames[1])),
+                             dynamic_probe_inputs=example(frames[1]), graph_transform=packed_weights,
+                             weight_quantization=quantization),
         ),
         "decoder_step": Component(
             lambda feature, current_token, hidden, cell: decode_step(model, feature, current_token, hidden, cell),
@@ -86,12 +98,16 @@ def from_model(model, source, *, revision=None, frames=(32, 49)):
              "hidden": np.zeros((rnn.num_layers, 1, rnn.hidden_size), np.float32),
              "cell": np.zeros((rnn.num_layers, 1, rnn.hidden_size), np.float32)},
             ("token_logits", "duration_logits", "hidden", "cell"),
-            ConversionConfig(optimize=False),
+            ConversionConfig(entrypoint_name="decode", optimize=False, weight_quantization=quantization),
         ),
     }
+    runtime_keys = ("mel_bins", "encoder_dim", "subsampling_factor", "decoder_layers", "decoder_hidden",
+                    "blank_id", "durations", "max_symbols", "processor", "frame_seconds")
     return Build("parakeet_redux", components, metadata=metadata,
+                 runtime_metadata={key: metadata[key] for key in runtime_keys}, asset_name="model.aimodel",
                  resources={"vocabulary.json": (json.dumps(model.vocabulary, ensure_ascii=False) + "\n").encode()})
 
 
-def build(source=DEFAULT_SOURCE, *, revision=None, frames=(32, 49)):
-    return from_model(load_source(source, revision=revision), source, revision=revision, frames=frames)
+def build(source=DEFAULT_SOURCE, *, revision=None, frames=(32, 49), weight_format="fp32"):
+    return from_model(load_source(source, revision=revision), source, revision=revision,
+                      frames=frames, weight_format=weight_format)

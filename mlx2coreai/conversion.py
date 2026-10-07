@@ -18,6 +18,7 @@ from .lower_to_coreai import (
 )
 from .passes import AnalyzedGraph, analyze_graph, summarize_inference
 from .signature import CaptureSignature
+from .quantization import WeightQuantization, quantize_linear_weights
 
 
 @dataclass(slots=True)
@@ -36,6 +37,10 @@ class ConversionConfig:
     min_runtime_target: str = "macOS27"
     constant_inputs: Mapping[str, Any] | None = None
     signature: CaptureSignature | None = None
+    # Recipe-local rewrites (e.g. preserving packed checkpoint constants) run
+    # after shape probing, before normalization and type inference.
+    graph_transform: Callable[[Graph], Graph] | None = None
+    weight_quantization: WeightQuantization | None = None
 
 
 @dataclass(slots=True)
@@ -55,6 +60,7 @@ class PreparedMLXGraph:
     extra_input_names: list[str]
     analysis: AnalyzedGraph | None = None
     config: ConversionConfig | None = None
+    quantization_report: dict[str, Any] | None = None
 
     @property
     def graph(self) -> Graph:
@@ -182,6 +188,12 @@ def prepare_mlx_conversion(
     expected_outputs = captured.expected_outputs
     if resolved.signature is not None:
         graph, expected_outputs = resolved.signature.bind(graph, expected_outputs)
+    if resolved.graph_transform is not None:
+        graph = resolved.graph_transform(graph)
+        graph.validate()
+    quantization_report = None
+    if resolved.weight_quantization is not None:
+        graph, quantization_report = quantize_linear_weights(graph, resolved.weight_quantization)
     captured = CapturedMLXGraph(
         graph=graph,
         normalized_inputs=captured.normalized_inputs,
@@ -200,6 +212,7 @@ def prepare_mlx_conversion(
         extra_input_names=extra_input_names,
         analysis=analysis,
         config=resolved,
+        quantization_report=quantization_report,
     )
 
 
@@ -278,6 +291,7 @@ def convert_prepared_mlx_to_coreai(
         "unresolved_extra_inputs": lowered.unresolved_extra_inputs,
         "weight_manifest": [entry.to_dict() for entry in lowered.weight_manifest],
         "inference_summary": prepared.inference_summary,
+        "quantization": prepared.quantization_report,
     }
     return ConvertedCoreAIModel(
         prepared=prepared,

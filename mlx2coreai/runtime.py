@@ -87,10 +87,28 @@ class CoreAISession:
         self._stack: AsyncExitStack | None = None
         self._function: Any = None
         self._asset: Any = None
+        self._executable: Any = None
+        self._owner: CoreAISession | None = None
+
+    def function_session(self, function_name: str) -> CoreAISession:
+        """Open another function using this session's executable and lifetime."""
+        self.function  # The owner must already be open.
+        session = CoreAISession(self.asset_or_path, function_name=function_name,
+                                specialization_options=self.specialization_options,
+                                storage_kind=self.storage_kind)
+        session._owner = self._owner or self
+        return session
 
     async def __aenter__(self) -> CoreAISession:
         if self._stack is not None:
             raise RuntimeError("CoreAI session is already open.")
+        if self._owner is not None:
+            self._owner.function
+            self._bindings, self._storage = self._owner._bindings, self._owner._storage
+            self.asset_path = self._owner.asset_path
+            self._function = self._owner._executable.load_function(self.function_name)
+            self._stack = AsyncExitStack()
+            return self
         self._bindings = _load_coreai_runtime()
         self._storage = _resolve_storage_kind(self.storage_kind, self._bindings.StorageKind)
         asset, self.asset_path = _coerce_asset(self.asset_or_path, self._bindings.AIModelAsset)
@@ -104,6 +122,7 @@ class CoreAISession:
             await stack.__aexit__(type(exc), exc, exc.__traceback__)
             raise
         self._asset = asset
+        self._executable = executable
         self._stack = stack
         return self
 
@@ -117,11 +136,14 @@ class CoreAISession:
             return False
         finally:
             self._asset = None
+            self._executable = None
 
     @property
     def function(self) -> Any:
         if self._stack is None:
             raise RuntimeError("CoreAI session must be used inside 'async with'.")
+        if self._owner is not None:
+            self._owner.function
         return self._function
 
     def reset_state(self, *, state_capacity: int) -> dict[str, Any]:

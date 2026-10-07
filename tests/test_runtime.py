@@ -132,6 +132,40 @@ def test_run_aimodel_sync(monkeypatch, tmp_path: Path) -> None:
     assert result.outputs["out"].tolist() == [4.0]
 
 
+def test_shared_function_session_lifetime(monkeypatch, tmp_path):
+    _install_fake_runtime(monkeypatch)
+    opened, closed = [], []
+    original_enter = FakeExecutable.__aenter__
+
+    async def enter(self):
+        opened.append(self)
+        return await original_enter(self)
+
+    async def close(self, *exc):
+        closed.append(self)
+
+    monkeypatch.setattr(FakeExecutable, "__aenter__", enter)
+    monkeypatch.setattr(FakeExecutable, "__aexit__", close)
+
+    async def check():
+        async with runtime.CoreAISession(tmp_path / "model.aimodel", function_name="encode") as owner:
+            child = owner.function_session("decode")
+            async with child:
+                result = await child.run({"x": np.array([2], np.float32)})
+                assert result["out"].numpy().tolist() == [3]
+                assert child.asset_path == owner.asset_path
+                assert len(opened) == 1 and not closed
+            assert not closed
+            assert (await owner.run({"x": [4]}))["out"].numpy().tolist() == [5]
+            with pytest.raises(RuntimeError, match="async with"):
+                child.function
+        assert len(closed) == 1
+        with pytest.raises(RuntimeError, match="async with"):
+            owner.function_session("decode")
+
+    asyncio.run(check())
+
+
 def test_compare_coreai_outputs_matches_by_order() -> None:
     comparisons = compare_coreai_outputs(
         {"runtime_out": np.asarray([1.0, 2.0], dtype=np.float32)},
