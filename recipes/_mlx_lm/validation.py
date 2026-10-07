@@ -1,11 +1,13 @@
 """Native MLX-LM reference observer; not imported by normal generation."""
 import numpy as np
 
+from recipes._validation import require_full_precision_mlx
 from .build import load_source
 
 
 class Reference:
     def __init__(self, bundle, adapter, *, source=None, model=None, max_abs_error=0.01, max_relative_l2=0.01):
+        require_full_precision_mlx("MLX-LM")
         if any(not np.isfinite(value) or value <= 0 for value in (max_abs_error, max_relative_l2)):
             raise ValueError("Validation tolerances must be positive and finite.")
         self.metadata = bundle.metadata
@@ -26,9 +28,11 @@ class Reference:
         actual, expected = np.asarray(actual, dtype=np.float32), np.asarray(expected, dtype=np.float32)
         if actual.shape != expected.shape or not np.isfinite(actual).all() or not np.isfinite(expected).all():
             raise AssertionError(f"{name}: shape mismatch or nonfinite values")
-        delta = actual - expected
+        # Corrupted FP32 states can still be finite; accumulate their norms in
+        # FP64 so the diagnostic remains meaningful instead of overflowing.
+        delta = actual.astype(np.float64) - expected.astype(np.float64)
         maximum = float(np.max(np.abs(delta))) if delta.size else 0.0
-        relative = float(np.linalg.norm(delta) / max(np.linalg.norm(expected), 1e-12))
+        relative = float(np.linalg.norm(delta) / max(np.linalg.norm(expected.astype(np.float64)), 1e-12))
         row = self.checks.setdefault(name, {"calls": 0, "max_abs_error": 0.0, "max_relative_l2": 0.0})
         row["calls"] += 1
         row["max_abs_error"] = max(row["max_abs_error"], maximum)

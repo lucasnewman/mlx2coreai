@@ -7,8 +7,8 @@ executes a request. Start with the guide for your model.
 | Recipe | Default source | Runtime output |
 | --- | --- | --- |
 | [Qwen3](qwen3/README.md) | `mlx-community/Qwen3-0.6B-bf16` | Token IDs |
-| [Qwen3.5](qwen35/README.md) | `Qwen/Qwen3.5-0.8B` | Token IDs; experimental |
-| [LFM2 / LFM2.5](lfm2/README.md) | `LiquidAI/LFM2.5-2.6B-MLX-bf16` | Token IDs; parity unresolved |
+| [Qwen3.5](qwen35/README.md) | `Qwen/Qwen3.5-0.8B` | Token IDs |
+| [LFM2 / LFM2.5](lfm2/README.md) | `LiquidAI/LFM2.5-2.6B-MLX-bf16` | Token IDs |
 | [Mimi](mimi/README.md) | Local Mimi codec checkpoint | Offline codes or audio arrays |
 | [Pocket TTS](pocket_tts/README.md) | `mlx-community/pocket-tts` | Streaming audio chunks |
 | [SmartTurn v3](smart_turn/README.md) | `mlx-community/smart-turn-v3` | Logits, probabilities, and endpoint decisions |

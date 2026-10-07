@@ -18,7 +18,7 @@ pip install mlx-audio sentencepiece
 ## Build
 
 ```bash
-python scripts/convert_pocket_tts.py --model mlx-community/pocket-tts \
+python -m recipes.pocket_tts convert --model mlx-community/pocket-tts \
   --output artifacts/recipes/pocket_tts_fp32
 ```
 
@@ -31,7 +31,7 @@ to keep a previous configuration.
 ## Run
 
 ```bash
-python scripts/run_pocket_tts.py artifacts/recipes/pocket_tts_fp32 \
+python -m recipes.pocket_tts run artifacts/recipes/pocket_tts_fp32 \
   --text "Hello! This is Pocket TTS running with Core AI." \
   --max-frames 150 --output artifacts/recipes/pocket_tts_fp32/speech.wav
 ```
@@ -77,6 +77,10 @@ Add `--validate-mlx` to the run command to compare component outputs and state
 against MLX. Use `--source /path/to/checkpoint` if the source checkpoint moved.
 Validation requires the original weights, adds reference execution to timings,
 and is not an inference benchmark.
+
+Validation replays the MLX components on the same inputs and checks their
+outputs and state. The CLI uses full-precision MLX. For Python validation,
+set `MLX_ENABLE_TF32=0` before any MLX kernels run.
 
 See the [recipe API guide](../../docs/recipe_api.md) for Python build/export
 and session lifecycle details.

@@ -155,13 +155,14 @@ def test_mimi_recipe(tmp_path):
     asyncio.run(check())
 
 
-def test_pocket_recipe_stream_and_reset(tmp_path):
+def test_pocket_recipe_stream_and_reset(tmp_path, monkeypatch):
     sp = pytest.importorskip("sentencepiece")
     import mlx.core as mx
     import mlx.nn as nn
     from coreai.runtime import ComputeUnitKind, SpecializationOptions
     from recipes.pocket_tts.build import components
     from recipes.pocket_tts import Request, run
+    from recipes.pocket_tts.validation import Reference
     from tests.test_pocket_tts import tiny_decoder
 
     model = tiny_decoder()
@@ -177,18 +178,21 @@ def test_pocket_recipe_stream_and_reset(tmp_path):
     sp.SentencePieceTrainer.train(sentence_iterator=iter(["Hello world.", "This is a recipe test."]),
         model_writer=tokenizer, vocab_size=32, hard_vocab_limit=False, minloglevel=2)
     conditioning = BytesIO()
-    np.savez(conditioning, voice=np.ones((1, 3, 16), np.float32) * 0.1,
+    np.savez(conditioning, voice=np.random.default_rng(95).normal(0, 0.1, (1, 3, 16)).astype(np.float32),
              bos=np.asarray(model.flow_lm.input_linear(model.flow_lm.bos_emb[None, None])))
     plan = Build("pocket_tts", components(model),
         {"tokenizer.model": tokenizer.getvalue(), "conditioning.npz": conditioning.getvalue()},
-        {"backbone_components": ["backbone0", "backbone1"], "latent_dim": 4,
+        {"source": "tiny", "flow_steps": 1,
+         "backbone_components": ["backbone0", "backbone1"], "latent_dim": 4,
          "sample_rate": 24000, "decoder_steps_per_frame": 2})
     bundle = export(plan, tmp_path / "pocket")
+    monkeypatch.setattr("recipes.pocket_tts.validation.load_source", lambda source: (model, tmp_path))
+    reference = Reference(bundle)
     request = Request(text="Hello world.", max_frames=3, ignore_eos=True, prefill_chunk_size=2)
 
     async def check():
         options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-        async with bundle.session(specialization_options=options, storage_kind="metal") as session:
+        async with bundle.session(specialization_options=options, storage_kind="metal", observer=reference) as session:
             report = {}
             first = [value async for value in run(session, request, report=report)]
             assert len(first) == 3 and all(value.shape == (8,) for value in first)
@@ -200,3 +204,5 @@ def test_pocket_recipe_stream_and_reset(tmp_path):
             second = [value async for value in run(session, request)]
             np.testing.assert_array_equal(np.concatenate(first), np.concatenate(second))
     asyncio.run(check())
+    assert {"conditioner", "backbone.hidden", "backbone.keyCache", "sampler.latent",
+            "decoder.audio", "decoder.keyCache", "decoder.convState0"} <= reference.checks.keys()

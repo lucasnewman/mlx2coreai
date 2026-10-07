@@ -96,12 +96,16 @@ def test_hybrid_state_shapes_and_probe_dtypes():
     assert values["recurrentState"].dtype == np.float32
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="macOS 27 26A428 native gated delta fails hybrid state/logit parity")
-def test_tiny_qwen35_dynamic_prefill_and_decode(tmp_path):
+@pytest.mark.parametrize("implementation", [
+    pytest.param("native", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
+        reason="CoreAI b3 native gated delta corrupts integrated hybrid recurrent state")),
+    "decomposed",
+])
+def test_tiny_qwen35_dynamic_prefill_and_decode(tmp_path, implementation):
     import mlx.core as mx
     from mlx_lm.models.qwen3_5 import TextModel, TextModelArgs
     from coreai.runtime import SpecializationOptions, ComputeUnitKind
+    from mlx2coreai import ConversionConfig
 
     if not SpecializationOptions.is_supported():
         pytest.skip("requires macOS 27 OS runtime")
@@ -115,6 +119,7 @@ def test_tiny_qwen35_dynamic_prefill_and_decode(tmp_path):
     model.eval()
     mx.eval(model.parameters())
     plan = qwen35.build("tiny-hybrid", max_context_length=32,
+                        config=ConversionConfig(gated_delta_implementation=implementation),
                         load_fn=lambda *args, **kwargs: (model, FakeTokenizer()))
     bundle = export(plan, tmp_path / "hybrid", save_graphs=True)
     main = bundle.manifest["components"]["main"]

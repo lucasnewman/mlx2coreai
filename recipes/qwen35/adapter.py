@@ -3,7 +3,7 @@ import warnings
 
 from recipes._mlx_lm.stateful import _layers, attention_layout
 
-WORKAROUNDS = ["Text decoder only; gated-delta runtime parity unvalidated for native and decomposed lowering"]
+WORKAROUNDS = ["Text decoder only; FP32/decomposed recurrence validated on b3; native recurrent state corrupts"]
 
 
 def experimental(precision, cache_dtype=None):
@@ -30,6 +30,6 @@ def cache_layout(model):
 
 
 def warn_precision(precision):
-    warnings.warn("Hybrid gated-delta export is experimental: macOS 27 build 26A428 has native "
-                  "output corruption and decomposed-loop compiler failures. Validate against MLX before use.",
+    warnings.warn("Hybrid gated-delta export is experimental: native recurrence corrupts state on "
+                  "coreai-core 1.0.0b3. Use FP32 with decomposed lowering and validate against MLX before use.",
                   RuntimeWarning, stacklevel=3)

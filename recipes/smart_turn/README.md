@@ -26,8 +26,7 @@ python -m recipes.smart_turn convert --output artifacts/recipes/smart_turn_fp32
 The default checkpoint is `mlx-community/smart-turn-v3`; missing weights are
 downloaded as needed. Supply a local directory or Hub ID after `convert` to
 override it, and `--revision` to pin a Hub version. Conversion uses FP32 without
-additional quantization. Authoring optimization is disabled because the beta
-optimizer can break bias reshapes for batches larger than one.
+additional quantization.
 
 For Python conversion:
 
@@ -95,6 +94,8 @@ decisions against MLX. Cases cover silence, noise, a tone, resampling, cropping,
 and batch sizes 1, 2, and 3. Add `--audio speech.wav` to include real audio.
 The default `--atol` and `--rtol` are both `1e-4`; results are written to
 `validation.json` in the bundle directory.
+The CLI uses full-precision MLX for validation. For Python validation, set
+`MLX_ENABLE_TF32=0` before any MLX kernels run.
 
 Validation also checks the source model's audio-to-endpoint API. Matching MLX
 does not establish turn-detection accuracy on real speech. This recipe is not

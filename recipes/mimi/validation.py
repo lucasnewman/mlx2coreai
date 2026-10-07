@@ -5,17 +5,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
 from mlx2coreai.recipe import export
+from recipes._validation import require_full_precision_mlx
 from .adapter import offline_forward
 from .build import load_source, from_model
 from .runtime import Request, run
 
 
 async def convert(args):
+    require_full_precision_mlx("Mimi")
     import mlx.core as mx
     from coreai.runtime import ComputeUnitKind, SpecializationOptions
     model = load_source(args.weights)
@@ -63,6 +66,7 @@ async def convert(args):
     print(f"Converted {entry['nodes']} nodes", flush=True)
     options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
     report = {"component": args.component, "weights": str(args.weights), "audio_files": [str(p) for p in args.audio],
+              "mlx_enable_tf32": os.environ["MLX_ENABLE_TF32"],
               "sample_rate": model.sample_rate, "frame_rate": model.frame_rate,
               "codebooks": 32, "codebook_size": model.cfg.quantizer_bins,
               "streaming": False, "samples_per_frame": samples_per_frame,
@@ -87,6 +91,9 @@ async def convert(args):
 
 
 def main():
+    # Keep the native MLX reference in full FP32 before loading or evaluating it.
+    # This flag is read once by MLX, so programmatic callers must set it at launch.
+    os.environ["MLX_ENABLE_TF32"] = "0"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--component", choices=["encode", "decode"], required=True)

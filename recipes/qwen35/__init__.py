@@ -1,4 +1,4 @@
-"""Experimental Qwen3.5 text-only recipe; not a runtime-correct model release."""
+"""Qwen3.5 text-only recipe; native recurrence remains experimental."""
 from recipes._mlx_lm.build import build_model
 from recipes._mlx_lm.runtime import Request, run
 from . import adapter

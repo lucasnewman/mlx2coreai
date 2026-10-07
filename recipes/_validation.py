@@ -1,5 +1,15 @@
 """Optional numerical checks shared by recipe validation, not normal execution."""
+import os
+
 import numpy as np
+
+
+def require_full_precision_mlx(recipe):
+    if os.environ.get("MLX_ENABLE_TF32") != "0":
+        raise RuntimeError(
+            f"{recipe} parity requires full-precision MLX references. Start a new process "
+            "with MLX_ENABLE_TF32=0 before any MLX kernels run."
+        )
 
 
 def compare(report, name, actual, expected):

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Initialize authoring before the compiler dialect to avoid a beta 3 import cycle.
+import coreai.authoring  # noqa: F401
+
 from .conversion import (
     CapturedMLXGraph,
     ConversionConfig,

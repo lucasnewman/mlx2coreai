@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -56,5 +57,6 @@ def main(argv=None):
     else:
         if not np.isfinite([args.atol, args.rtol]).all() or args.atol <= 0 or args.rtol <= 0:
             parser.error("atol and rtol must be finite and positive")
+        os.environ["MLX_ENABLE_TF32"] = "0"
         from .validation import validate as validate_model
         asyncio.run(validate_model(args))

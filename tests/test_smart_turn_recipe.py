@@ -14,6 +14,18 @@ from recipes import smart_turn
 from recipes.smart_turn.build import from_model
 
 
+@pytest.mark.parametrize("tf32", [None, "1"])
+def test_validation_requires_full_precision_mlx(monkeypatch, tf32):
+    from recipes.smart_turn.validation import validate
+
+    if tf32 is None:
+        monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
+    else:
+        monkeypatch.setenv("MLX_ENABLE_TF32", tf32)
+    with pytest.raises(RuntimeError, match="MLX_ENABLE_TF32=0"):
+        asyncio.run(validate(SimpleNamespace()))
+
+
 def test_tiny_smart_turn_dynamic_batch(tmp_path):
     pytest.importorskip("mlx_audio")
     import mlx.core as mx

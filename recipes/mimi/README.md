@@ -70,11 +70,14 @@ These commands each convert and validate one component. Run both to populate
 a complete bundle:
 
 ```bash
-python scripts/convert_mimi.py --weights /path/to/mimi.safetensors \
+python -m recipes.mimi.validation --weights /path/to/mimi.safetensors \
   --component encode --output artifacts/recipes/mimi_fp32
-python scripts/convert_mimi.py --weights /path/to/mimi.safetensors \
+python -m recipes.mimi.validation --weights /path/to/mimi.safetensors \
   --component decode --output artifacts/recipes/mimi_fp32
 ```
+
+The CLI uses full-precision MLX for validation. For Python validation, set
+`MLX_ENABLE_TF32=0` before any MLX kernels run.
 
 Add `--audio speech.wav` to include a real audio fixture, or
 `--frames 2,3,1,5,13` to test other sequence lengths. Results are saved as

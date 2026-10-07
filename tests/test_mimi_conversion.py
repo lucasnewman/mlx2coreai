@@ -1,5 +1,7 @@
 """Optional Mimi integration without external checkpoint downloads."""
+import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -7,6 +9,18 @@ import pytest
 from mlx2coreai import ConversionConfig, convert_mlx_to_coreai
 from recipes.mimi.adapter import offline_forward
 from mlx2coreai.runtime import run_aimodel_sync
+
+
+@pytest.mark.parametrize("tf32", [None, "1"])
+def test_mimi_validation_rejects_reduced_precision_reference(monkeypatch, tf32):
+    from recipes.mimi.validation import convert
+
+    if tf32 is None:
+        monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
+    else:
+        monkeypatch.setenv("MLX_ENABLE_TF32", tf32)
+    with pytest.raises(RuntimeError, match="MLX_ENABLE_TF32=0"):
+        asyncio.run(convert(SimpleNamespace()))
 
 
 def tiny_mimi():

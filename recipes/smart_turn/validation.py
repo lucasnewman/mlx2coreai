@@ -6,6 +6,7 @@ import json
 import numpy as np
 
 from mlx2coreai.recipe import export
+from recipes._validation import require_full_precision_mlx
 from .build import load_source, from_model
 from .runtime import Request, run
 
@@ -23,6 +24,7 @@ def audio_cases(audio_paths):
 
 
 async def validate(args):
+    require_full_precision_mlx("SmartTurn")
     import mlx.core as mx
     from coreai.runtime import ComputeUnitKind, SpecializationOptions
 
@@ -33,7 +35,8 @@ async def validate(args):
                 for _, audio, sr in cases]
 
     bundle = export(plan, args.output)
-    report = {"model": args.model, "conversion": bundle.manifest["components"]["main"],
+    report = {"model": args.model, "mlx_enable_tf32": "0", "atol": args.atol, "rtol": args.rtol,
+              "conversion": bundle.manifest["components"]["main"],
               "input_shape": [None, *bundle.metadata["feature_shape"]],
               "preprocessing": bundle.metadata["preprocessing"], "results": []}
     options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())

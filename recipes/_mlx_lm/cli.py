@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from mlx2coreai import ConversionConfig
@@ -32,10 +33,12 @@ async def generate(recipe, args):
     tokenizer = load_tokenizer(bundle)
     report = {}
     options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
-    async with bundle.session(specialization_options=options, storage_kind="metal", observer=observer) as session:
+    async with bundle.session(specialization_options=options, storage_kind=args.storage_kind, observer=observer) as session:
         tokens = [token async for token in run(session, request, report=report)]
     report["text"] = tokenizer.decode(tokens)
     report["timing_includes_mlx_validation"] = observer is not None
+    report["mlx_enable_tf32"] = None if observer is None else os.environ["MLX_ENABLE_TF32"]
+    report["storage_kind"] = args.storage_kind
     if observer is not None:
         report.update(checks=observer.checks, calls=observer.calls)
     print(json.dumps(report, indent=2), flush=True)
@@ -62,6 +65,9 @@ def main(recipe):
     generate_parser.add_argument("--chat", action="store_true")
     generate_parser.add_argument("--max-new-tokens", type=int, default=32)
     generate_parser.add_argument("--state-capacity", type=int)
+    generate_parser.add_argument("--storage-kind", choices=["metal", "bytes"],
+        default=getattr(recipe, "DEFAULT_STORAGE_KIND", "metal"),
+        help="State/input buffer backing; LFM defaults to bytes to avoid beta GPU cache corruption.")
     generate_parser.add_argument("--prefill-chunk-size", type=int, default=128)
     generate_parser.add_argument("--prefill-chunks", default="")
     generate_parser.add_argument("--temperature", type=float, default=0.0)
@@ -75,6 +81,9 @@ def main(recipe):
     generate_parser.add_argument("--max-relative-l2", type=float, default=0.01)
     generate_parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
+    if args.command == "run" and args.validate_mlx:
+        # MLX caches this flag on first use, before loading reference weights.
+        os.environ["MLX_ENABLE_TF32"] = "0"
     if args.command == "convert":
         options = {"revision": args.revision, "cache_dtype": args.cache_dtype,
             "max_context_length": args.max_context_length,

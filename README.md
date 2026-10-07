@@ -41,8 +41,8 @@ Each guide includes setup, build, run, and validation instructions.
 | Recipe | What it does | Compatibility |
 | --- | --- | --- |
 | [Qwen3](recipes/qwen3/README.md) | Stateful text generation | Default 0.6B checkpoint validated in FP32 |
-| [Qwen3.5](recipes/qwen35/README.md) | Hybrid text decoder | Experimental; decoding parity unresolved |
-| [LFM2 / LFM2.5](recipes/lfm2/README.md) | Dense and MoE text generation | Full-model parity unresolved; MoE experimental |
+| [Qwen3.5](recipes/qwen35/README.md) | Hybrid text decoder | Experimental; use FP32 with decomposed recurrence |
+| [LFM2 / LFM2.5](recipes/lfm2/README.md) | Dense and MoE text generation | LFM2.5 FP32 with byte-backed state; MoE experimental |
 | [Mimi](recipes/mimi/README.md) | Offline audio encode/decode | FP32; not streaming |
 | [Pocket TTS](recipes/pocket_tts/README.md) | Stateful streaming speech generation | FP32; precomputed voices |
 | [SmartTurn v3](recipes/smart_turn/README.md) | Speech endpoint detection from mel features | FP32; dynamic batches; preprocessing outside asset |

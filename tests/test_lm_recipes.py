@@ -15,6 +15,28 @@ from tests.test_mlx_lm_source import FakeTokenizer
 from tests.test_lfm2_stateful import tiny_lfm2
 
 
+@pytest.mark.parametrize("tf32", [None, "1"])
+def test_reference_requires_full_precision_mlx(monkeypatch, tf32):
+    from types import SimpleNamespace
+
+    if tf32 is None:
+        monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
+    else:
+        monkeypatch.setenv("MLX_ENABLE_TF32", tf32)
+    with pytest.raises(RuntimeError, match="MLX_ENABLE_TF32=0"):
+        Reference(SimpleNamespace(), qwen3.adapter)
+
+
+def test_reference_reports_finite_metrics_for_corrupted_fp32_state():
+    from types import SimpleNamespace
+
+    reference = Reference(SimpleNamespace(metadata={}), qwen3.adapter, model=object())
+    actual = np.full((4,), np.finfo(np.float32).max, np.float32)
+    with pytest.raises(AssertionError, match="recurrentState"):
+        reference.compare("recurrentState", actual, np.ones((4,), np.float32))
+    assert np.isfinite(reference.checks["recurrentState"]["max_relative_l2"])
+
+
 def tiny_qwen3():
     import mlx.core as mx
     from mlx_lm.models.qwen3 import Model, ModelArgs

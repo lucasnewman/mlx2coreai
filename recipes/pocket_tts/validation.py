@@ -1,13 +1,14 @@
-"""Independent native-MLX replay attached as a session observer."""
+"""Native-MLX component/state replay using the same inputs as CoreAI."""
 import numpy as np
 
-from recipes._validation import compare, compare_cache
+from recipes._validation import compare, compare_cache, require_full_precision_mlx
 from .adapter import StreamingDecoder
 from .build import load_source
 
 
 class Reference:
     def __init__(self, bundle, *, source=None):
+        require_full_precision_mlx("Pocket TTS")
         self.model, _ = load_source(source or bundle.metadata["source"])
         self.blocks = bundle.metadata["backbone_components"]
         self.steps = bundle.metadata["flow_steps"]
@@ -34,7 +35,7 @@ class Reference:
             compare(self.checks, "conditioner", actual["embeddings"],
                     np.asarray(flow.conditioner(TokenizedText(mx.array(inputs["tokens"])))))
         if component == self.blocks[0]:
-            self.embeddings = np.asarray(inputs["embeddings"])
+            self.embeddings = np.asarray(inputs["embeddings"]).copy()
         if component == self.blocks[-1]:
             reference = flow.out_norm(flow.transformer(mx.array(self.embeddings), self.caches))
             self.offset += self.embeddings.shape[1]

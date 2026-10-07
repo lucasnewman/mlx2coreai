@@ -30,7 +30,7 @@ from coreai._compiler.ir import (
     Value,
 )
 from coreai.authoring import AIProgram, Context
-from coreai._compiler.types import TensorSpec as CoreAITensorSpec
+from coreai.authoring.types import TensorSpec as CoreAITensorSpec
 
 from .dtypes import (
     constant_array as _array_to_coreai,
@@ -475,7 +475,9 @@ class CoreAILowerer:
         )
         optimized = bool(self.config.optimize and optimization_skip_reason is None)
         if optimized:
-            program.optimize()
+            # Beta 3 applies the pre-compilation rewrite on authoring Module exit.
+            with program._module:
+                pass
         first_entry = entries[0].entrypoint_name
         return LoweredCoreAIProgram(
             program=program,

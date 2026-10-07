@@ -14,6 +14,18 @@ from recipes.pocket_tts.adapter import (
 )
 
 
+@pytest.mark.parametrize("tf32", [None, "1"])
+def test_reference_requires_full_precision_mlx(monkeypatch, tf32):
+    from recipes.pocket_tts.validation import Reference
+
+    if tf32 is None:
+        monkeypatch.delenv("MLX_ENABLE_TF32", raising=False)
+    else:
+        monkeypatch.setenv("MLX_ENABLE_TF32", tf32)
+    with pytest.raises(RuntimeError, match="MLX_ENABLE_TF32=0"):
+        Reference(SimpleNamespace())
+
+
 def tiny_flow():
     pytest.importorskip("mlx_audio")
     import mlx.core as mx

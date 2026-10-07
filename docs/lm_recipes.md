@@ -6,9 +6,9 @@ with the model's README:
 
 | Recipe | Guide |
 | --- | --- |
-| [Qwen3](../recipes/qwen3/README.md) | Validated default FP32 generation |
-| [Qwen3.5](../recipes/qwen35/README.md) | Experimental text-only hybrid decoder |
-| [LFM2 / LFM2.5](../recipes/lfm2/README.md) | Dense and MoE conversion; parity unresolved |
+| [Qwen3](../recipes/qwen3/README.md) | FP32 text generation |
+| [Qwen3.5](../recipes/qwen35/README.md) | Experimental hybrid text decoder |
+| [LFM2 / LFM2.5](../recipes/lfm2/README.md) | Dense and MoE text generation |
 
 ## Shared Conversion Options
 
@@ -37,6 +37,8 @@ does not load the source checkpoint. Keep bundles in `artifacts/`.
   specifies initial chunk lengths before the remaining prompt is processed.
 - `--state-capacity` allocates room for prompt and generated tokens. It must be
   at least the prompt length plus the requested generation budget.
+- `--storage-kind` selects `metal` or `bytes` for input/state buffers. LFM
+  defaults to `bytes`; Qwen defaults to `metal`. Both use GPU computation.
 - `--json-output results.json` saves generated text, token IDs, and timings.
 
 Query length and cache capacity are dynamic. Conversion's `--max-context-length`
@@ -80,5 +82,8 @@ relative L2 error bounds are both 0.01; set `--max-abs-error` and
 
 Validation loads both implementations and uses additional memory. Do not use
 its timings as inference benchmarks. Omit `--validate-mlx` for normal execution.
+The CLI uses full-precision MLX matrix operations and applies the bundle's
+compute precision policy to the reference. For Python validation, set
+`MLX_ENABLE_TF32=0` before any MLX kernels run.
 The largest FP32 models may not fit alongside their MLX reference on the same
 machine. See the [recipe API](recipe_api.md) for bundle and session usage.
