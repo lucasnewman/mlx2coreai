@@ -16,12 +16,12 @@ from .runtime import Request, run
 
 
 def convert_main(argv=None):
-    parser = argparse.ArgumentParser(description="Convert the Pocket TTS recipe.")
+    parser = argparse.ArgumentParser(description="Convert a Pocket TTS or Phonon model.")
     parser.add_argument("--model", default="mlx-community/pocket-tts")
     parser.add_argument("--revision")
     parser.add_argument("--output", type=Path, default=Path("artifacts/pocket_tts_fp32"))
-    parser.add_argument("--steps", type=int, default=1)
-    parser.add_argument("--voice", default="alba")
+    parser.add_argument("--steps", type=int, help="Flow integration steps (default: model configuration).")
+    parser.add_argument("--voice", help="Bundled voice name or embedding path/URL (default: model's voice).")
     parser.add_argument("--component", choices=["all", "conditioner", "backbone", "sampler", "decoder"], default="all")
     args = parser.parse_args(argv)
     plan = build(args.model, revision=args.revision, steps=args.steps, voice=args.voice)
@@ -72,7 +72,9 @@ def run_main(argv=None):
         if isinstance(field.default, bool):
             parser.add_argument(name, action="store_true")
         else:
-            parser.add_argument(name, default=field.default, type=int if field.default is None else type(field.default))
+            value_type = float if field.name in ("temperature", "eos_threshold", "noise_clamp") else (
+                int if field.default is None else type(field.default))
+            parser.add_argument(name, default=field.default, type=value_type)
     parser.add_argument("--validate-mlx", action="store_true")
     parser.add_argument("--source")
     args = parser.parse_args(argv)

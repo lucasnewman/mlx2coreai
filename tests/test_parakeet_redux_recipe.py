@@ -115,6 +115,30 @@ def test_cli_convert(monkeypatch, tmp_path):
     assert calls == [(("local",), {"revision": "abc", "frames": (17, 33), "weight_format": "uint2"}), ("plan", tmp_path)]
 
 
+def test_cli_neural_engine_convert(monkeypatch, tmp_path):
+    from recipes.parakeet_redux import cli
+
+    calls = []
+    monkeypatch.setattr(cli, "build", lambda *a, **kw: calls.append((a, kw)) or "plan")
+    monkeypatch.setattr(cli, "export", lambda *a: calls.append(a))
+    cli.main(["convert", "local", "--neural-engine-frames", "512", "--output", str(tmp_path)])
+    assert calls == [(("local",), {"revision": None, "frames": (32, 49), "weight_format": "fp32",
+                                  "neural_engine_frames": 512}), ("plan", tmp_path)]
+
+
+def test_specialization_report_uses_final_residency():
+    from recipes.parakeet_redux.cli import specialization_report
+
+    def placement(unit):
+        return {"key": "residency", "value": {"string": {"_0": unit}}}
+    debug = [{"identifier": "optimized", "operations": [
+        {"metadatas": [placement("GPU"), placement("ANE")]},
+        {"metadatas": [placement("GPU"), placement("GPU")]}, {"metadatas": []}]}]
+    session = SimpleNamespace(_sessions={"encoder": SimpleNamespace(
+        _executable=SimpleNamespace(_debug_infos=json.dumps(debug).encode()))})
+    assert specialization_report(session) == [{"identifier": "optimized", "residency": {"ANE": 1, "GPU": 1}}]
+
+
 def test_wrong_bundle(tmp_path):
     session = FakeSession(tmp_path, [])
     session.bundle.manifest["recipe"] = "smart_turn"
@@ -169,6 +193,47 @@ def test_comparison_tensor_errors():
     assert not tensor_error(expected * np.nan, expected, atol=1e-4, rtol=1e-4)["valid"]
 
 
+def test_fixed_encoder_inputs():
+    metadata = {**METADATA, "encoder_frames": 16, "encoder_dtype": "fp16"}
+    mel = np.ones((1, 7, 8), np.float32)
+    inputs = encoder_inputs(mel, 6, metadata)
+    assert all(value.dtype == np.float16 for value in inputs.values())
+    assert inputs["mel"].shape == (1, 16, 8)
+    assert inputs["pos_emb"].shape == (1, 15, 128)
+    np.testing.assert_array_equal(inputs["mel"][:, :7], mel)
+    assert not inputs["mel"][:, 7:].any()
+    np.testing.assert_array_equal(inputs["lengths"], [[3]])
+    np.testing.assert_array_equal(inputs["positions"], np.arange(16)[None])
+    # A redundant zero preprocessing frame can be replaced by conv padding.
+    trimmed = encoder_inputs(np.pad(mel, ((0, 0), (0, 10), (0, 0))), 6, metadata)
+    np.testing.assert_array_equal(trimmed["mel"], inputs["mel"])
+    with pytest.raises(ValueError, match="at most 16"):
+        encoder_inputs(np.ones((1, 17, 8), np.float32), 16, metadata)
+    with pytest.raises(ValueError, match="at most 16"):
+        encoder_inputs(np.zeros((1, 17, 8), np.float32), 17, metadata)
+    with np.errstate(over="ignore"), pytest.raises(ValueError, match="finite FP16"):
+        encoder_inputs(mel * 1e10, 6, metadata)
+
+
+def test_fixed_runtime_casts_decoder_features(tmp_path):
+    class Session(FakeSession):
+        def __init__(self):
+            super().__init__(tmp_path, [(0, 1)] * 3)
+            self.bundle.metadata = {**METADATA, "encoder_frames": 16, "encoder_dtype": "fp16"}
+
+        async def run(self, name, inputs, **kwargs):
+            if name == "decoder_step":
+                assert inputs["feature"].dtype == np.float32
+            output = await super().run(name, inputs, **kwargs)
+            if name == "encoder":
+                output["features"] = output["features"].astype(np.float16)
+                output["lengths"] = inputs["lengths"][:, -1]
+            return output
+
+    result = asyncio.run(parakeet_redux.run(Session(), parakeet_redux.Request(np.zeros((7, 8)))))
+    assert result["completed"] and len(result["tokens"]) == 3
+
+
 def tiny_model(factor=2):
     pytest.importorskip("mlx_audio.stt.models.parakeet.redux")
     import mlx.core as mx
@@ -211,6 +276,86 @@ def test_reject_ambiguous_capture_shapes():
     model = tiny_model(8)
     with pytest.raises(ValueError, match="remainder 1"):
         from_model(model, "tiny-redux", frames=(33, 49))
+
+
+@pytest.mark.parametrize("frames", [True, 0, 7, 129, 4104])
+def test_reject_invalid_neural_engine_frames(frames):
+    with pytest.raises(ValueError, match="neural_engine_frames"):
+        from_model(tiny_model(8), "tiny-redux", neural_engine_frames=frames)
+
+
+def test_neural_engine_rejects_packed_weights():
+    with pytest.raises(ValueError, match="dense weights"):
+        from_model(tiny_model(8), "tiny-redux", weight_format="uint2", neural_engine_frames=128)
+
+
+def test_large_fixed_fp16_indices():
+    plan = from_model(tiny_model(8), "tiny-redux", neural_engine_frames=4096)
+    for length in (2049, 2051, 2999, 3000, 4095, 4096):
+        inputs = encoder_inputs(np.zeros((1, 4096, 8), np.float32), length, plan.runtime_metadata)
+        # Odd indices above 2048 may round, but none are used by the graph.
+        positions = inputs["positions"]
+        for stage in range(3):
+            positions = positions[:, ::2] * np.float16(0.5)
+            np.testing.assert_array_equal(positions[0], np.arange(4096 // (2 ** (stage + 1))))
+            assert inputs["lengths"][0, stage] == (length + 2 ** (stage + 1) - 1) // 2 ** (stage + 1)
+
+
+def test_encoding_latency_stats():
+    from recipes.parakeet_redux.benchmark import latency_stats
+
+    stats = latency_stats([0.1, 0.2, 0.3], 30)
+    assert stats["median_ms"] == 200
+    assert stats["real_time_factor"] == 0.2 / 30
+    assert stats["audio_seconds_per_second"] == 150
+
+
+@pytest.mark.parametrize("backend", ["cpu", "neural-engine"])
+def test_tiny_fixed_fp16_encoder(tmp_path, backend):
+    import mlx.core as mx
+    from coreai.runtime import ComputeUnitKind, SpecializationOptions
+    from mlx2coreai.recipe import export
+    from recipes.parakeet_redux.adapter import encode
+
+    model = tiny_model(8)
+    plan = from_model(model, "tiny-redux", neural_engine_frames=128)
+    assert not plan.components["encoder"].config.capture_shapeless
+    assert plan.runtime_metadata["encoder_frames"] == 128
+    assert plan.runtime_metadata["encoder_dtype"] == "fp16"
+    bundle = export(plan, tmp_path / "fixed", save_graphs=True)
+    graph = json.loads((bundle.path / "encoder_graph.json").read_text())
+    assert all(value["dtype"] == "fp16" for value in graph["inputs"])
+    assert not {"ceil", "floor_div", "bitwisebinary", "blockwise_shift_scale"} & {
+        node["op"] for node in graph["nodes"]}
+    rng = np.random.default_rng(99)
+
+    async def check():
+        options = (SpecializationOptions.cpu_only() if backend == "cpu" else
+                   SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.neural_engine()))
+        async with bundle.session(specialization_options=options) as session:
+            for count, length in ((128, 127), (129, 128), (101, 100), (17, 13), (9, 8), (3, 2)):
+                mel = rng.normal(size=(1, count, 8)).astype(np.float32)
+                if count == 129:
+                    mel[:, -1] = 0  # Source preprocessing's extra frame at the bucket boundary.
+                inputs = encoder_inputs(mel, length, bundle.metadata)
+                # Floating ceil/indices and fixed padding preserve FP32 mask semantics.
+                reference, lengths = model.encoder(mx.array(mel), mx.array([length], mx.int32))
+                padded = encode(model, **{key: mx.array(value.astype(np.float32)) for key, value in inputs.items()},
+                                floating_indices=True)
+                valid = int(np.asarray(lengths)[0])
+                np.testing.assert_allclose(np.asarray(padded[0])[:, :valid], np.asarray(reference)[:, :valid],
+                                           atol=3e-3, rtol=3e-3)
+                actual = await session.run("encoder", inputs, readback=True)
+                assert actual["features"].shape == (1, 16, 128)
+                assert actual["features"].dtype == np.float16
+                assert np.isfinite(actual["features"]).all()
+                np.testing.assert_array_equal(actual["lengths"], np.asarray(lengths))
+                np.testing.assert_allclose(actual["features"][:, :valid], np.asarray(reference)[:, :valid],
+                                           atol=0.07, rtol=0.07)
+            result = await parakeet_redux.run(session, parakeet_redux.Request(mel, length))
+            assert isinstance(result["text"], str)
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("weight_format", ["uint4", "uint8"])

@@ -1,4 +1,4 @@
-"""Evaluate a compressed CoreAI bundle directly against an FP32 bundle."""
+"""Evaluate a candidate CoreAI bundle directly against an FP32 bundle."""
 import json
 from pathlib import Path
 
@@ -31,8 +31,9 @@ def _asset_size(bundle):
 def _compatible(reference, candidate):
     if any(b.manifest["recipe"] != "parakeet_redux" for b in (reference, candidate)):
         raise ValueError("Comparison requires two Parakeet Redux recipe bundles.")
-    if reference.metadata.get("weight_format", "fp32") != "fp32":
-        raise ValueError("The reference bundle must use FP32 weights.")
+    if (reference.metadata.get("weight_format", "fp32") != "fp32"
+            or reference.metadata.get("encoder_dtype", "fp32") != "fp32"):
+        raise ValueError("The reference bundle must use an FP32 encoder and FP32 weights.")
     for key in ("mel_bins", "encoder_dim", "subsampling_factor", "decoder_layers", "decoder_hidden",
                 "blank_id", "durations", "max_symbols", "processor", "frame_seconds"):
         if reference.metadata[key] != candidate.metadata[key]:
@@ -42,7 +43,7 @@ def _compatible(reference, candidate):
 
 
 async def compare(args):
-    from coreai.runtime import ComputeUnitKind, SpecializationOptions
+    from .cli import specialization_options, specialization_report
 
     reference, candidate = Bundle.open(args.reference), Bundle.open(args.candidate)
     _compatible(reference, candidate)
@@ -62,8 +63,14 @@ async def compare(args):
               "reference_asset_bytes": _asset_size(reference), "candidate_asset_bytes": _asset_size(candidate),
               "atol": args.atol, "rtol": args.rtol, "results": [],
               "scope": "Agreement with FP32 on supplied clips; not a labeled ASR benchmark."}
+    decisions_only = getattr(args, "decisions_only", False)
+    report["require_numerical_allclose"] = not decisions_only
     report["asset_size_reduction"] = 1 - report["candidate_asset_bytes"] / report["reference_asset_bytes"]
-    options = SpecializationOptions.from_preferred_compute_unit_kind(ComputeUnitKind.gpu())
+    options = specialization_options()
+    compute_unit = getattr(args, "compute_unit", "gpu")
+    debug_path = getattr(args, "specialization_report", None)
+    candidate_options = specialization_options(compute_unit, debug=debug_path is not None)
+    report["candidate_compute_unit_preference"] = compute_unit
     traces = {}
 
     def observer(session, component, inputs, outputs):
@@ -71,19 +78,20 @@ async def compare(args):
             {name: value.numpy().copy() for name, value in outputs.items()})
 
     async with reference.session(specialization_options=options, observer=observer) as ref_session:
-        async with candidate.session(specialization_options=options, observer=observer) as test_session:
+        async with candidate.session(specialization_options=candidate_options, observer=observer) as test_session:
             for name, mel in cases:
                 traces.clear()
                 ref_result = await run(ref_session, Request(mel))
                 result = await run(test_session, Request(mel))
                 ref_trace, test_trace = traces[id(ref_session)], traces[id(test_session)]
+                valid = int(ref_trace["encoder"][0]["lengths"][0])
                 row = {"case": name, "fp32_text": ref_result["text"], "candidate_text": result["text"],
                        "matching_text": result["text"] == ref_result["text"],
                        "matching_token_ids": [t["id"] for t in result["tokens"]] == [t["id"] for t in ref_result["tokens"]],
                        "matching_timestamps": result["tokens"] == ref_result["tokens"],
                        "completed": result["completed"] and ref_result["completed"],
-                       "encoder": tensor_error(test_trace["encoder"][0]["features"],
-                                               ref_trace["encoder"][0]["features"], atol=args.atol, rtol=args.rtol)}
+                       "encoder": tensor_error(test_trace["encoder"][0]["features"][:, :valid],
+                                               ref_trace["encoder"][0]["features"][:, :valid], atol=args.atol, rtol=args.rtol)}
                 ref_steps, test_steps = ref_trace.get("decoder_step", []), test_trace.get("decoder_step", [])
                 row["fp32_decoder_steps"], row["candidate_decoder_steps"] = len(ref_steps), len(test_steps)
                 row["matching_step_decisions"] = len(ref_steps) == len(test_steps) and all(
@@ -98,16 +106,21 @@ async def compare(args):
                         "max_abs_error": max((c.get("max_abs_error", float("inf")) for c in checks), default=0.0),
                         "max_relative_l2": max((c.get("relative_l2", float("inf")) for c in checks), default=0.0),
                     }
-                row["passed"] = all(row[k] for k in ("matching_text", "matching_token_ids", "matching_timestamps",
-                                                     "matching_step_decisions", "completed")) and row["encoder"]["allclose"] and all(
+                row["numerical_allclose"] = row["encoder"]["allclose"] and all(
                     c["allclose"] for c in row["decoder"].values())
+                row["passed"] = all(row[k] for k in ("matching_text", "matching_token_ids", "matching_timestamps",
+                                                     "matching_step_decisions", "completed")) and (
+                    decisions_only or row["numerical_allclose"])
                 report["results"].append(row)
                 print(json.dumps(row, ensure_ascii=False), flush=True)
+            if debug_path:
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                debug_path.write_text(json.dumps(specialization_report(test_session), indent=2) + "\n")
     report["passed"] = all(row["passed"] for row in report["results"])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(f"{'PASS' if report['passed'] else 'FAIL'}: {len(cases)} cases; "
           f"asset reduction {report['asset_size_reduction']:.1%}; saved {args.output}", flush=True)
     if not report["passed"]:
-        raise AssertionError("Compressed bundle differs from FP32; inspect the comparison report.")
+        raise AssertionError("Candidate bundle differs from FP32; inspect the comparison report.")
     return report

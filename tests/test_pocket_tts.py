@@ -26,7 +26,7 @@ def test_reference_requires_full_precision_mlx(monkeypatch, tf32):
         Reference(SimpleNamespace())
 
 
-def tiny_flow():
+def tiny_flow(*, gelu="erf", time_rms_norm="rms_var"):
     pytest.importorskip("mlx_audio")
     import mlx.core as mx
     from mlx_audio.tts.models.pocket_tts.flow_lm import FlowLMModel
@@ -34,19 +34,21 @@ def tiny_flow():
     from mlx_audio.tts.models.pocket_tts.mlp import SimpleMLPAdaLN
 
     mx.random.seed(91)
-    flow = FlowLMModel(None, SimpleMLPAdaLN(4, 16, 4, 16, 2, num_time_conds=2),
-                       StreamingTransformer(16, 2, 2, 32), dim=16, ldim=4)
+    flow = FlowLMModel(None, SimpleMLPAdaLN(4, 16, 4, 16, 2, num_time_conds=2,
+                                          time_rms_norm=time_rms_norm),
+                       StreamingTransformer(16, 2, 2, 32, gelu=gelu), dim=16, ldim=4)
     flow.eval()
     mx.eval(flow.parameters())
     return flow
 
 
 @pytest.mark.parametrize("partitioned", [False, True])
-def test_stateful_backbone_dynamic_cache_and_reset(tmp_path, partitioned):
+@pytest.mark.parametrize("gelu", ["erf", "tanh"])
+def test_stateful_backbone_dynamic_cache_and_reset(tmp_path, partitioned, gelu):
     import mlx.core as mx
     from coreai.runtime import NDArray, SpecializationOptions, ComputeUnitKind
 
-    flow = tiny_flow()
+    flow = tiny_flow(gelu=gelu)
     rng = np.random.default_rng(92)
     converted = []
     for index in (range(flow.transformer.num_layers) if partitioned else [None]):
@@ -93,13 +95,16 @@ def test_stateful_backbone_dynamic_cache_and_reset(tmp_path, partitioned):
 
 
 @pytest.mark.parametrize("steps", [1, 4])
-def test_flow_sampler(tmp_path, steps):
+@pytest.mark.parametrize("phonon", [False, True])
+def test_flow_sampler(tmp_path, steps, phonon):
     import mlx.core as mx
     from coreai.runtime import SpecializationOptions
     from mlx_audio.tts.models.pocket_tts.flow_lm import lsd_decode
     from mlx2coreai.runtime import run_aimodel_sync
 
-    flow = tiny_flow()
+    flow = tiny_flow(time_rms_norm="rms" if phonon else "rms_var")
+    if phonon:
+        flow._conditioning_embedding = mx.full((1, flow.dim), 0.25)
     rng = np.random.default_rng(93)
     inputs = {"hidden": rng.normal(size=(1, 16)).astype(np.float32),
               "noise": rng.normal(size=(1, 4)).astype(np.float32)}
@@ -108,6 +113,8 @@ def test_flow_sampler(tmp_path, steps):
     native = lsd_decode(lambda s, t, x: flow.flow_net(mx.array(inputs["hidden"]), s, t, x),
                         mx.array(inputs["noise"]), steps)
     expected = [np.asarray(native), np.asarray(flow.input_linear(native[:, None]))]
+    if phonon:
+        expected[1] += np.asarray(flow._conditioning_embedding)
     actual = run_aimodel_sync(converted.asset, inputs, specialization_options=SpecializationOptions.cpu_only()).outputs
     for name, reference in zip(converted.prepared.normalized_graph.outputs, expected):
         np.testing.assert_allclose(actual[name], reference, atol=1e-5, rtol=1e-4)

@@ -1,4 +1,4 @@
-"""FP32 offline Parakeet Redux conversion with dynamic mel sequence length."""
+"""Offline Redux conversion with dynamic FP32 or fixed FP16 encoding."""
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -7,7 +7,7 @@ import numpy as np
 
 from mlx2coreai import ConversionConfig, WeightQuantization
 from mlx2coreai.recipe import Build, Component
-from .adapter import prepare_model, encode, decode_step
+from .adapter import prepare_model, encode, decode_step, fp16_encoder_graph
 from .runtime import encoder_inputs
 
 DEFAULT_SOURCE = "moondream/parakeet-redux"
@@ -27,23 +27,32 @@ def load_source(source, *, revision=None):
     return model
 
 
-def from_model(model, source, *, revision=None, frames=(32, 49), weight_format="fp32"):
+def from_model(model, source, *, revision=None, frames=(32, 49), weight_format="fp32",
+               neural_engine_frames=None):
     if weight_format not in ("fp32", "uint2", "uint4", "uint8"):
         raise ValueError("weight_format must be fp32, uint2, uint4, or uint8.")
-    if (len(frames) != 2 or any(type(n) is not int or n < 3 for n in frames)
-            or frames[0] == frames[1]):
+    if neural_engine_frames is None and (len(frames) != 2 or any(type(n) is not int or n < 3 for n in frames)
+                                        or frames[0] == frames[1]):
         raise ValueError("Capture and probe require two different mel frame counts >= 3.")
     cfg = model.encoder_config
     if (not getattr(cfg, "mask_padding", False) or cfg.self_attention_model != "rel_pos"
             or cfg.subsampling != "dw_striding" or cfg.subsampling_factor not in (2, 4, 8)):
         raise ValueError("Expected the Redux masked relative-position Conformer encoder.")
     factor = int(cfg.subsampling_factor)
+    if neural_engine_frames is not None:
+        # Only even input indices are read, after the first stride-2 conv.
+        # Those indices, and lengths / 2, are exact in FP16 through 4096.
+        if (type(neural_engine_frames) is not int or not factor <= neural_engine_frames <= 4096
+                or neural_engine_frames % factor):
+            raise ValueError("neural_engine_frames must be a multiple of subsampling_factor, at most 4096.")
+        if weight_format != "fp32":
+            raise ValueError("Neural Engine export requires dense weights (weight_format='fp32'); packed groups are unsupported.")
     # Distinguish ceil-divided subsampler dimensions from 2*S-1 PE dimensions.
     # With both captures at 8*k+1, for example, ceil(T/4) aliases 2*S-1;
     # two-point probing would then truncate an unseen 8*k+5 sequence.
-    if {n % factor for n in frames} != {0, 1}:
+    if neural_engine_frames is None and {n % factor for n in frames} != {0, 1}:
         raise ValueError("Capture/probe need one frame count divisible by subsampling_factor and one with remainder 1.")
-    if (frames[0] + factor - 1) // factor == (frames[1] + factor - 1) // factor:
+    if neural_engine_frames is None and (frames[0] + factor - 1) // factor == (frames[1] + factor - 1) // factor:
         raise ValueError("Capture and probe must have different subsampled frame counts.")
     prepared_weights = prepare_model(model, preserve_quantization=weight_format == "uint2")
     quantized_modules = prepared_weights.module_count
@@ -76,19 +85,28 @@ def from_model(model, source, *, revision=None, frames=(32, 49), weight_format="
             or metadata["max_symbols"] <= 0):
         raise ValueError("Invalid Redux vocabulary or TDT decoding configuration.")
     rng = np.random.default_rng(53)
+    if neural_engine_frames is not None:
+        metadata.update(encoder_frames=neural_engine_frames, encoder_dtype="fp16", precision="mixed",
+                        dynamic_frames=False)
+        metadata["workarounds"] += ["fixed padded FP16 encoder with host-computed subsampling lengths"]
 
     def example(n):
         mel = rng.normal(size=(1, n, cfg.feat_in)).astype(np.float32)
         mel[:, -1] = 0
-        return encoder_inputs(mel, n - 1, metadata)
+        inputs = encoder_inputs(mel, n - 1, metadata)
+        # Capture in FP32 for stable source semantics; the graph transform
+        # authors FP16 operations and constants in the CoreAI encoder.
+        return {key: value.astype(np.float32) for key, value in inputs.items()} if neural_engine_frames else inputs
 
     components = {
         "encoder": Component(
-            lambda mel, lengths, pos_emb, positions: encode(model, mel, lengths, pos_emb, positions),
-            example(frames[0]), ("features", "lengths"),
-            ConversionConfig(entrypoint_name="encode", optimize=False, capture_shapeless=True,
-                             dynamic_axes={"mel": [1], "pos_emb": [1], "positions": [1]},
-                             dynamic_probe_inputs=example(frames[1]), graph_transform=packed_weights,
+            lambda mel, lengths, pos_emb, positions: encode(model, mel, lengths, pos_emb, positions,
+                                                           floating_indices=neural_engine_frames is not None),
+            example(neural_engine_frames or frames[0]), ("features", "lengths"),
+            ConversionConfig(entrypoint_name="encode", optimize=False, capture_shapeless=neural_engine_frames is None,
+                             dynamic_axes={"mel": [1], "pos_emb": [1], "positions": [1]} if neural_engine_frames is None else None,
+                             dynamic_probe_inputs=example(frames[1]) if neural_engine_frames is None else None,
+                             graph_transform=fp16_encoder_graph if neural_engine_frames else packed_weights,
                              weight_quantization=quantization),
         ),
         "decoder_step": Component(
@@ -103,11 +121,15 @@ def from_model(model, source, *, revision=None, frames=(32, 49), weight_format="
     }
     runtime_keys = ("mel_bins", "encoder_dim", "subsampling_factor", "decoder_layers", "decoder_hidden",
                     "blank_id", "durations", "max_symbols", "processor", "frame_seconds")
+    if neural_engine_frames is not None:
+        runtime_keys += ("encoder_frames", "encoder_dtype")
     return Build("parakeet_redux", components, metadata=metadata,
                  runtime_metadata={key: metadata[key] for key in runtime_keys}, asset_name="model.aimodel",
                  resources={"vocabulary.json": (json.dumps(model.vocabulary, ensure_ascii=False) + "\n").encode()})
 
 
-def build(source=DEFAULT_SOURCE, *, revision=None, frames=(32, 49), weight_format="fp32"):
+def build(source=DEFAULT_SOURCE, *, revision=None, frames=(32, 49), weight_format="fp32",
+          neural_engine_frames=None):
     return from_model(load_source(source, revision=revision), source, revision=revision,
-                      frames=frames, weight_format=weight_format)
+                      frames=frames, weight_format=weight_format,
+                      **({"neural_engine_frames": neural_engine_frames} if neural_engine_frames is not None else {}))

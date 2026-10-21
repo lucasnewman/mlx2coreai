@@ -10,7 +10,7 @@ executes a request. Start with the guide for your model.
 | [Qwen3.5](qwen35/README.md) | `Qwen/Qwen3.5-0.8B` | Token IDs |
 | [LFM2 / LFM2.5](lfm2/README.md) | `LiquidAI/LFM2.5-2.6B-MLX-bf16` | Token IDs |
 | [Mimi](mimi/README.md) | Local Mimi codec checkpoint | Offline codes or audio arrays |
-| [Pocket TTS](pocket_tts/README.md) | `mlx-community/pocket-tts` | Streaming audio chunks |
+| [Pocket TTS / Phonon](pocket_tts/README.md) | `mlx-community/pocket-tts` | Streaming audio chunks |
 | [SmartTurn v3](smart_turn/README.md) | `mlx-community/smart-turn-v3` | Logits, probabilities, and endpoint decisions |
 | [Parakeet Redux](parakeet_redux/README.md) | `moondream/parakeet-redux` | Transcript and token timestamps |
 

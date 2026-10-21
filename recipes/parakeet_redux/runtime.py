@@ -13,6 +13,16 @@ class Request:
 
 
 def encoder_inputs(mel, length, metadata):
+    fixed = metadata.get("encoder_frames")
+    if fixed is not None:
+        if mel.shape[1] > fixed:
+            # Log-mel appends a zero frame. At an exact bucket boundary its
+            # contribution is identical to the convolution's zero padding.
+            if length <= fixed and not np.any(mel[:, fixed:]):
+                mel = mel[:, :fixed]
+            else:
+                raise ValueError(f"Mel has {mel.shape[1]} frames; this fixed encoder accepts at most {fixed}.")
+        mel = np.pad(mel, ((0, 0), (0, fixed - mel.shape[1]), (0, 0)))
     factor = metadata["subsampling_factor"]
     count = (mel.shape[1] + factor - 1) // factor
     # Match mlx-audio's FP32 sinusoidal PE, including the order of operations.
@@ -22,8 +32,15 @@ def encoder_inputs(mel, length, metadata):
     pe = np.empty((1, 2 * count - 1, dim), np.float32)
     pe[0, :, 0::2] = np.sin(positions * rates)
     pe[0, :, 1::2] = np.cos(positions * rates)
-    return {"mel": mel, "lengths": np.array([length], np.int32), "pos_emb": pe,
-            "positions": np.arange(mel.shape[1], dtype=np.int32)[None]}
+    inputs = {"mel": mel, "lengths": np.array([length], np.int32), "pos_emb": pe,
+              "positions": np.arange(mel.shape[1], dtype=np.int32)[None]}
+    if metadata.get("encoder_dtype") == "fp16":
+        inputs["lengths"] = np.array([[(length + divisor - 1) // divisor
+                                      for divisor in (2 ** n for n in range(1, factor.bit_length()))]], np.float32)
+        inputs = {key: value.astype(np.float16) for key, value in inputs.items()}
+        if not all(np.isfinite(value).all() for value in inputs.values()):
+            raise ValueError("Encoder inputs must be representable as finite FP16 values.")
+    return inputs
 
 
 def _special(piece):
@@ -50,7 +67,7 @@ async def run(session, request: Request, *, report=None):
     encoded = await session.run("encoder", encoder_inputs(mel, length, metadata), readback=True)
     features = encoded["features"]
     factor = metadata["subsampling_factor"]
-    count = (mel.shape[1] + factor - 1) // factor
+    count = (metadata.get("encoder_frames", mel.shape[1]) + factor - 1) // factor
     valid = (length + factor - 1) // factor
     if (features.shape != (1, count, metadata["encoder_dim"]) or not np.isfinite(features).all()
             or encoded["lengths"].shape != (1,) or encoded["lengths"][0] != valid):
@@ -69,7 +86,7 @@ async def run(session, request: Request, *, report=None):
         if frame >= valid:
             break
         output = await session.run("decoder_step", {
-            "feature": features[:, frame:frame + 1], "current_token": np.array([[last_token]], np.int32),
+            "feature": features[:, frame:frame + 1].astype(np.float32), "current_token": np.array([[last_token]], np.int32),
             "hidden": hidden, "cell": cell,
         }, readback=True)
         shapes = {"token_logits": (blank + 1,), "duration_logits": (len(durations),),

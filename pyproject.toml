@@ -27,6 +27,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+pocket-tts = [
+    "mlx-audio>=0.6.1",
+    "sentencepiece",
+    "tokenizers",
+]
 test = [
     "pytest",
 ]

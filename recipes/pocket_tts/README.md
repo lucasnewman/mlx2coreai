@@ -1,7 +1,8 @@
-# Pocket TTS
+# Pocket TTS and Phonon
 
-Generate 24 kHz mono speech from mlx-audio's Pocket TTS using an FP32 CoreAI
-pipeline. KV caches and convolution state persist across generation steps.
+Generate 24 kHz mono speech from mlx-audio's Pocket TTS and Gradium Phonon
+models using an FP32 CoreAI pipeline. KV caches and convolution state persist
+across generation steps.
 The bundle uses precomputed voice conditioning; arbitrary voice cloning is
 not exported.
 
@@ -11,9 +12,19 @@ Use Python 3.11+, macOS 27, and compatible CoreAI developer tools. Run these
 commands from the repository root:
 
 ```bash
-pip install -e .
-pip install mlx-audio sentencepiece
+pip install -e '.[pocket-tts]'
 ```
+
+Phonon requires mlx-audio 0.6.1 or later. Supported checkpoints include:
+
+| Model | Checkpoint |
+| --- | --- |
+| Pocket TTS | `mlx-community/pocket-tts` |
+| Phonon 31M | [gradium/phonon-31m-en](https://huggingface.co/gradium/phonon-31m-en) |
+| Phonon 40M | [gradium/phonon-40m-en](https://huggingface.co/gradium/phonon-40m-en) |
+
+For Phonon 40M, accept the model's access terms on Hugging Face and sign in
+before conversion.
 
 ## Build
 
@@ -22,9 +33,20 @@ python -m recipes.pocket_tts convert --model mlx-community/pocket-tts \
   --output artifacts/recipes/pocket_tts_fp32
 ```
 
-Missing files are downloaded automatically. The defaults are the Alba voice
-and one flow integration step. Set `--voice`, `--steps`, and optionally
-`--revision` during conversion. Rebuild the entire bundle when changing the
+To build either Phonon model:
+
+```bash
+python -m recipes.pocket_tts convert --model gradium/phonon-31m-en \
+  --output artifacts/recipes/phonon31_fp32
+python -m recipes.pocket_tts convert --model gradium/phonon-40m-en \
+  --output artifacts/recipes/phonon40_fp32
+```
+
+Missing files are downloaded automatically. Pocket TTS uses Alba by default;
+Phonon uses its bundled default voice. Flow integration steps follow the
+checkpoint configuration. Set `--voice`, `--steps`, and optionally `--revision`
+during conversion. `--voice` accepts a bundled voice name, a local voice
+embedding file, or an `hf://` URL. Rebuild the entire bundle when changing the
 checkpoint, voice, or flow-step configuration; use a separate output directory
 to keep a previous configuration.
 
@@ -36,10 +58,15 @@ python -m recipes.pocket_tts run artifacts/recipes/pocket_tts_fp32 \
   --max-frames 150 --output artifacts/recipes/pocket_tts_fp32/speech.wav
 ```
 
+Use `artifacts/recipes/phonon31_fp32` or `artifacts/recipes/phonon40_fp32` as
+the bundle path to run Phonon with the same command.
+
 The CLI writes a WAV and a sibling JSON report after generation; it is not a
 live audio player. Supply a punctuated utterance and use `--max-frames` to bound
 generation. Text is processed as one prompt without automatic sentence
-splitting. Use `--help` for temperature, seed, prefill, and EOS controls.
+splitting. Temperature, EOS threshold, and noise clipping default to the
+checkpoint settings. Use `--temperature`, `--eos-threshold`, and `--noise-clamp`
+to override them; see `--help` for seed, prefill, and other generation controls.
 
 ## Stream in Python
 

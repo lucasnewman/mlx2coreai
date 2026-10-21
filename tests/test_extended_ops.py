@@ -63,6 +63,16 @@ def test_bitwise_invert(tmp_path, operator, dtype):
     assert (mx.bitwise_invert, mx.array.__invert__) == original
 
 
+def test_boolean_invert_capture_avoids_xor():
+    import mlx.core as mx
+    from mlx2coreai import capture_mlx_graph
+
+    captured = capture_mlx_graph(lambda x: ~(x < 0), {"x": np.array([-1, 0, 1], np.float32)})
+    assert any(node.op == "logicalnot" for node in captured.graph.nodes)
+    assert not any(node.op == "bitwisebinary" and node.attrs.get("mode") == 2 for node in captured.graph.nodes)
+    np.testing.assert_array_equal(next(iter(captured.expected_outputs.values())), [False, True, True])
+
+
 def test_capture_patches_restore_on_failure():
     import mlx.core as mx
     from mlx2coreai.from_mlx import capture_graph_from_mlx_function

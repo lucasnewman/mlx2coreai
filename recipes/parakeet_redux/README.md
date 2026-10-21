@@ -32,6 +32,144 @@ Conversion and optional audio preprocessing use MLX. Running from prepared
 mel features needs only CoreAI and NumPy; opening a bundle never reloads the
 checkpoint.
 
+## Experimental Neural Engine specialization
+
+The recipe can export a fixed-shape, dense FP16 encoder for Neural Engine
+specialization. The decoder remains FP32. CoreAI's preference permits fallback,
+so this is mixed ANE/GPU execution, rather than an ANE-only model.
+
+```bash
+python -m recipes.parakeet_redux convert --neural-engine-frames 512 \
+  --output artifacts/parakeet_redux_neural_engine
+python -m recipes.parakeet_redux run artifacts/parakeet_redux_neural_engine \
+  --audio speech.wav --compute-unit neural-engine \
+  --specialization-report artifacts/parakeet_redux_neural_engine/placement.json
+```
+
+The runtime pads mel arrays to 512 frames and preserves the supplied valid
+length. This example accepts roughly 5.1 seconds of audio. Longer inputs raise
+an error; choose a larger frame count when converting. The count must be a
+multiple of the subsampling factor (8 for Redux), at most 4096. Only even input
+positions are used after the first stride-2 convolution, so those positions
+and the host-computed subsampling lengths remain exact in FP16. `--frames`
+capture/probe settings apply only to dynamic exports. Dense `--weight-format
+fp32` is required: the beta ANE compiler rejects the packed model's blockwise
+group quantization. Despite that weight-format name, this option stores encoder
+weights and computes encoder activations in FP16. The full package is about
+1.22 GiB.
+
+Three adaptations enable this path:
+
+- Boolean inversion captures as logical NOT rather than XOR. The encoder mask
+  uses a direct greater-or-equal comparison.
+- Fixed sequence shapes and FP16 tensors enable actual ANE placement.
+- The host computes the valid lengths after each strided convolution. This
+  avoids integer division and an observed beta ANE ceiling bug returning
+  negative lengths.
+
+For app integrations, the fixed encoder inputs are FP16: `mel` is
+`[1, encoder_frames, 128]`, `positions` is `[1, encoder_frames]`, and `pos_emb`
+is `[1, 2 * (encoder_frames / 8) - 1, 1024]`. `lengths` is **`[1, 3]`**, holding
+`ceil(valid_mel_length / 2)`, `ceil(valid_mel_length / 4)`, and
+`ceil(valid_mel_length / 8)`. Frame positions are `0 .. encoder_frames - 1`.
+The output features and final length are FP16; cast each selected feature to
+FP32 before calling the unchanged decoder. The config includes
+`encoder_frames` and `encoder_dtype`; dynamic bundles retain their existing
+FP32 mel/PE and int32 length/index contracts.
+
+The full 512-frame model was tested with Neural Engine preference on six speech
+fixtures, silence, and noise. All eight transcripts and token ID sequences
+matched FP32. Seven cases also matched every duration decision and timestamp;
+the longer speech clip had timestamp differences. Valid encoder feature
+relative L2 differences ranged from 1.18% to 4.39%. These results reproduced
+across two runs. Optimized placement diagnostics reported 2,826 ANE operations
+and 75 GPU operations. These counts do not measure runtime share or establish
+a speedup.
+
+To evaluate a saved candidate and inspect its placement:
+
+```bash
+python -m recipes.parakeet_redux compare artifacts/parakeet_redux_fp32 \
+  artifacts/parakeet_redux_neural_engine --audio speech.wav \
+  --compute-unit neural-engine --decisions-only \
+  --specialization-report artifacts/parakeet_redux_neural_engine/placement.json \
+  --output artifacts/parakeet_redux_neural_engine/comparison.json
+```
+
+`--decisions-only` still requires identical token IDs, transcripts, timestamps,
+and token/duration decisions. It reports numerical differences without requiring
+FP32-level `allclose`. The eight-case evaluation fails this strict decision
+criterion on the longer clip, so this path remains experimental. Broader ASR
+quality and performance evaluation is needed before app deployment.
+
+## Encoder performance at 30 seconds
+
+375 **encoded** frames represent 30 seconds: `375 * 0.08 s`. The conversion
+option counts **mel** frames, so use `--neural-engine-frames 3000`. The runtime
+can discard the preprocessing's redundant final zero frame at this exact
+bucket boundary; valid audio frames are retained.
+
+```bash
+python -m recipes.parakeet_redux convert --neural-engine-frames 3000 \
+  --output artifacts/parakeet_redux_neural_engine_30s
+python -m recipes.parakeet_redux benchmark-encoder \
+  artifacts/parakeet_redux_neural_engine_30s --audio speech_30s.wav \
+  --warmup 5 --iterations 50 --placement \
+  --output artifacts/parakeet_redux_neural_engine_30s/encoding_benchmark.json
+```
+
+`benchmark-encoder` compares GPU and Neural Engine preference by default.
+Use `--compute-unit gpu` for a GPU baseline. Prepared `.npy` features can be
+supplied with `--mel`; `--length` specifies valid mel frames. The benchmark
+prepares CoreAI input buffers once, times serial completed encoder calls with
+output readback, and checks output shape, finite values, and the valid length.
+It excludes audio preprocessing, positional-embedding preparation, session
+opening/specialization, and decoding. First-call latency is recorded separately.
+`--placement` uses a separate debug session outside the measurements.
+
+Measured on an Apple M5 Max, macOS 27.0.1, CoreAI 1.0.0b3, with identical
+3,000-frame features from a repeated local speech fixture, five warmup calls
+after the initial call, and 50 timed calls per backend:
+
+| Encoder | Median | P90 |
+| --- | ---: | ---: |
+| FP32, GPU preferred (dynamic baseline) | 51.17 ms | 54.11 ms |
+| FP16, GPU preferred (fixed 3,000 mel frames) | 15.88 ms | 17.13 ms |
+| FP16, Neural Engine preferred (same fixed model) | 89.71 ms | 90.11 ms |
+
+GPU-preferred FP16 encoding was 3.22 times faster than the FP32 baseline.
+Neural Engine preference was 5.65 times slower than GPU FP16 and 1.75 times
+slower than GPU FP32, despite confirmed ANE placement. Its median real-time
+factor was 0.00299 (30 seconds encoded in about 90 ms). These are encoder-only
+wall times with readback, rather than end-to-end ASR latency or power measurements.
+The 30-second benchmark validates finite outputs and lengths, rather than
+transcript quality at that duration.
+
+Power sampling on the same M5 Max showed a different tradeoff. With
+`powermetrics` CPU/GPU/ANE samplers running at a requested 100 ms interval, two
+20-second sustained windows per backend were run in GPU/ANE/ANE/GPU order.
+Both sessions were warmed, inputs were reused, and outputs were read back.
+Nearby settled idle windows supplied a baseline, and interval-average power
+was integrated against timestamped workload boundaries.
+
+| FP16 encoder preference | Mean latency | Additional CPU+GPU+ANE power above idle | Estimated incremental energy per encoding |
+| --- | ---: | ---: | ---: |
+| GPU | 15.89 ms | 68.34 W | 1.086 J |
+| Neural Engine | 89.82 ms | 4.80 W | 0.431 J |
+
+The ANE-preferred path used about **60% less incremental energy per encoding**,
+despite taking 5.65 times longer. Individual trial estimates were 1.070/1.102 J
+for GPU and 0.430/0.432 J for ANE. Including three-second post-workload settling
+periods gave 1.087 J and 0.434 J respectively, preserving the result.
+The estimate includes CPU work and GPU fallback, rather than only the active
+accelerator rail. Active combined power averaged 69.90 W on GPU and 6.08 W
+on ANE; the nearby idle baselines averaged 1.56 W and 1.28 W.
+
+These are system-wide, estimated CPU+GPU+ANE energy counters with idle power
+subtracted, rather than whole-device battery or wall-plug measurements.
+Background activity and sustained-versus-isolated operation affect the result.
+For app integration, repeat the comparison at the app's actual request cadence.
+
 ## Build and Transcribe
 
 ```bash
@@ -154,7 +292,7 @@ python -m recipes.parakeet_redux compare \
   --audio speech.wav --output artifacts/parakeet_redux_comparison.json
 ```
 
-The reference must have FP32 weights. Comparison checks encoder features,
+The reference must have FP32 weights. Comparison checks valid encoder features,
 every decoder step's logits and state, token/duration decisions, transcripts,
 timestamps, completion, and asset sizes. It saves the report even when a
 quality check fails. Passing `--mel file.npy` evaluates prepared features

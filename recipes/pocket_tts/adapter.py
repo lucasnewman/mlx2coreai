@@ -89,12 +89,20 @@ def backbone_forward(flow_lm, embeddings, position, *, layer_index=None, **state
         y = mx.fast.scaled_dot_product_attention(q, k, v, scale=attn.scale, mask=mask)
         y = attn.out_proj(y.transpose(0, 2, 1, 3).reshape(b, t, attn.embed_dim))
         x = x + layer._apply_scale(y, layer.layer_scale_1)
-        y = layer.linear2(nn.gelu(layer.linear1(layer.norm2(x))))
+        activation = getattr(layer, "activation", nn.gelu)
+        y = layer.linear2(activation(layer.linear1(layer.norm2(x))))
         x = x + layer._apply_scale(y, layer.layer_scale_2)
     if final:
         x = flow_lm.out_norm(x) if flow_lm.out_norm is not None else x
         return (x, flow_lm.out_eos(x), *_cache_outputs(caches))
     return (x, *_cache_outputs(caches))
+
+
+def input_embedding(flow_lm, latent):
+    """Project a generated frame and apply the model's fixed conditions."""
+    embedding = flow_lm.input_linear(latent)
+    condition = getattr(flow_lm, "_conditioning_embedding", None)
+    return embedding if condition is None else embedding + condition
 
 
 def sample_forward(flow_lm, hidden, noise, *, steps=1):
@@ -105,7 +113,7 @@ def sample_forward(flow_lm, hidden, noise, *, steps=1):
         raise ValueError("Flow decoding steps must be positive.")
     with _uncompiled_silu(flow_lm.flow_net):
         latent = lsd_decode(lambda s, t, x: flow_lm.flow_net(hidden, s, t, x), noise, steps)
-    return latent, flow_lm.input_linear(latent[:, None, :])
+    return latent, input_embedding(flow_lm, latent[:, None, :])
 
 
 @contextmanager

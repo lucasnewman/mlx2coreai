@@ -19,7 +19,11 @@ def export_compatibility(mx):
 
         def serializable_invert(a, stream=None):
             a = mx.array(a) if not isinstance(a, mx.array) else a
-            mask = mx.array(True if a.dtype == mx.bool_ else -1, dtype=a.dtype)
+            # Boolean inversion has an exportable logical primitive. XOR with
+            # True is equivalent but prevents Neural Engine specialization.
+            if a.dtype == mx.bool_:
+                return mx.logical_not(a, stream=stream)
+            mask = mx.array(-1, dtype=a.dtype)
             return mx.bitwise_xor(a, mask, stream=stream)
 
         def serializable_windows(x, window_shape, window_strides):

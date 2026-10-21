@@ -46,7 +46,11 @@ class Reference:
             hidden, noise = mx.array(inputs["hidden"]), mx.array(inputs["noise"])
             reference = lsd_decode(lambda s, t, x: flow.flow_net(hidden, s, t, x), noise, self.steps)
             compare(self.checks, "sampler.latent", actual["latent"], np.asarray(reference))
-            compare(self.checks, "sampler.embedding", actual["embedding"], np.asarray(flow.input_linear(reference[:, None])))
+            embedding = flow.input_linear(reference[:, None])
+            condition = getattr(flow, "_conditioning_embedding", None)
+            if condition is not None:
+                embedding = embedding + condition
+            compare(self.checks, "sampler.embedding", actual["embedding"], np.asarray(embedding))
         if component == "decoder":
             value = (mx.array(inputs["latent"]) * flow.emb_std + flow.emb_mean).transpose(0, 2, 1)
             reference = self.model.mimi.decode_step(self.model.mimi.quantizer(value))

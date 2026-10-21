@@ -12,10 +12,29 @@ class Request:
     prefill_chunk_size: int = 64
     state_capacity: int | None = None
     frames_after_eos: int = 3
-    eos_threshold: float = -4.0
-    temperature: float = 0.7
+    eos_threshold: float | None = None
+    temperature: float | None = None
     seed: int = 42
     ignore_eos: bool = False
+    noise_clamp: float | None = None
+
+
+def tokenize(bundle, text):
+    """Read the packaged tokenizer without importing MLX or mlx-audio."""
+    kind = bundle.metadata.get("tokenizer_type", "sentencepiece")
+    if kind == "sentencepiece":
+        import sentencepiece
+
+        tokenizer = sentencepiece.SentencePieceProcessor(str(bundle.resource("tokenizer.model")))
+        tokens = tokenizer.encode(text, out_type=int)
+    elif kind == "huggingface":
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_file(str(bundle.resource("tokenizer.json")))
+        tokens = tokenizer.encode(text, add_special_tokens=False).ids
+    else:
+        raise ValueError(f"Unsupported tokenizer type: {kind}")
+    return np.array([tokens], np.int32)
 
 
 async def run(session, request: Request, *, report=None):
@@ -24,21 +43,21 @@ async def run(session, request: Request, *, report=None):
     The caller owns the session context, including when iteration stops early.
     Optional report timings exclude session opening and caller time between yields.
     """
-    import sentencepiece
-
-    if (request.max_frames <= 0 or request.prefill_chunk_size <= 0 or request.frames_after_eos < 0
-            or not np.isfinite(request.temperature) or request.temperature < 0
-            or not np.isfinite(request.eos_threshold)):
-        raise ValueError("Invalid frame limit, chunk size, tail count, temperature, or EOS threshold.")
     bundle = session.bundle
     if bundle.manifest["recipe"] != "pocket_tts":
         raise ValueError("Expected a Pocket TTS recipe bundle.")
     metadata = bundle.metadata
+    temperature = metadata.get("temperature", 0.7) if request.temperature is None else request.temperature
+    eos_threshold = metadata.get("eos_threshold", -4.0) if request.eos_threshold is None else request.eos_threshold
+    noise_clamp = metadata.get("noise_clamp") if request.noise_clamp is None else request.noise_clamp
+    if (request.max_frames <= 0 or request.prefill_chunk_size <= 0 or request.frames_after_eos < 0
+            or not np.isfinite(temperature) or temperature < 0 or not np.isfinite(eos_threshold)
+            or (noise_clamp is not None and (not np.isfinite(noise_clamp) or noise_clamp < 0))):
+        raise ValueError("Invalid frame limit, chunk size, tail count, temperature, EOS threshold, or noise clamp.")
     blocks = metadata["backbone_components"]
     if not blocks or set(("conditioner", "sampler", "decoder", *blocks)) - set(session.names):
         raise ValueError("Missing Pocket TTS components; finish conversion first.")
-    tokenizer = sentencepiece.SentencePieceProcessor(str(bundle.resource("tokenizer.model")))
-    tokens = np.array([tokenizer.encode(request.text, out_type=int)], np.int32)
+    tokens = tokenize(bundle, request.text)
     if tokens.shape[1] == 0:
         raise ValueError("Text must contain at least one token.")
     with np.load(bundle.resource("conditioning.npz")) as conditioning:
@@ -81,12 +100,14 @@ async def run(session, request: Request, *, report=None):
     for step in range(request.max_frames):
         hidden, eos = await backbone(embeddings)
         stats["eos_logit"] = float(eos[0, -1, 0])
-        if stats["eos_logit"] > request.eos_threshold and eos_step is None:
+        if stats["eos_logit"] > eos_threshold and eos_step is None:
             eos_step = step
         if not request.ignore_eos and eos_step is not None and step >= eos_step + request.frames_after_eos:
             stopped_on_eos = True
             break
-        noise = rng.normal(size=(1, metadata["latent_dim"])).astype(np.float32) * np.float32(request.temperature**0.5)
+        noise = rng.normal(size=(1, metadata["latent_dim"])).astype(np.float32) * np.float32(temperature**0.5)
+        if noise_clamp is not None:
+            noise = np.clip(noise, -noise_clamp, noise_clamp)
         sampled = await session.run("sampler", {"hidden": hidden[:, -1], "noise": noise}, readback=True)
         embeddings = sampled["embedding"]
         audio = (await session.run("decoder", {"latent": sampled["latent"][:, None],
@@ -105,7 +126,8 @@ async def run(session, request: Request, *, report=None):
     elapsed = time.perf_counter() - start - consumer_seconds
     decode_seconds = time.perf_counter() - decode_start - consumer_seconds
     stats.update({"bundle": str(bundle.path), "text": request.text, "seed": request.seed,
-        "temperature": request.temperature, "frames": frames, "eos_step": eos_step,
+        "temperature": temperature, "eos_threshold": eos_threshold, "noise_clamp": noise_clamp,
+        "frames": frames, "eos_step": eos_step,
         "stopped_on_eos": stopped_on_eos, "sample_rate": metadata["sample_rate"],
         "audio_seconds": samples / metadata["sample_rate"], "elapsed_seconds": elapsed,
         "prefill_seconds": prefill_seconds, "decode_seconds": decode_seconds,
